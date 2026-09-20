@@ -1,0 +1,3 @@
+data:
+  # Resolved against the working directory. Format follows from the extension.
+  path: data/youtube_trending_cleaned_us.csv
