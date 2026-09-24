@@ -1,0 +1,8 @@
+data:
+  # Resolved against the working directory. Format follows from the extension.
+  path: data/youtube_trending_cleaned_us.csv
+
+database:
+  # The DSN carries a password, so it comes from $DATABASE_URL, not this file.
+  max_rows: 1000
+  timeout: 10.0
