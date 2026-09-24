@@ -6,12 +6,14 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from .data import DataConfig
+from .database import DatabaseConfig
 
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     data: DataConfig
+    database: DatabaseConfig
 
     @classmethod
     def load(cls, path: Path | str = "config.yml") -> "Config":

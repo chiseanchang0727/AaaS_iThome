@@ -8,7 +8,8 @@
 
 from .base import Config
 from .data import DataConfig, DataType
+from .database import DatabaseConfig
 
-__all__ = ["Config", "DataConfig", "DataType", "cfg"]
+__all__ = ["Config", "DataConfig", "DataType", "DatabaseConfig", "cfg"]
 
 cfg = Config.load()
