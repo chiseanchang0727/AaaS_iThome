@@ -11,7 +11,11 @@ class DatabaseConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     max_rows: int
-    """Refuse a result larger than this rather than flooding the agent."""
+    """Refuse a result with more rows than this rather than fetching it all.
+
+    Protects the database and process memory. How much of a result may enter
+    the agent's context is `AgentConfig.max_result_tokens`.
+    """
 
     timeout: float
     """Seconds before a query is cancelled."""

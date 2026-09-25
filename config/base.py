@@ -5,6 +5,7 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from .agent import AgentConfig
 from .data import DataConfig
 from .database import DatabaseConfig
 
@@ -12,6 +13,7 @@ from .database import DatabaseConfig
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    agent: AgentConfig
     data: DataConfig
     database: DatabaseConfig
 

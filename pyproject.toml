@@ -6,7 +6,9 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "asyncpg>=0.31.0",
+    "deepagents>=0.7.18",
     "ipykernel>=7.3.0",
+    "langchain-anthropic>=1.7.4",
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
     "pydantic>=2.13.5",

@@ -1,8 +1,18 @@
+agent:
+  model: anthropic:claude-sonnet-4-6
+  # Resolved against the working directory. Read-only to the agent.
+  skills_dir: skills
+  # A tool result bigger than this is refused rather than put into the model's
+  # context. Approximate: ~4 characters per token.
+  max_result_tokens: 5000
+
 data:
   # Resolved against the working directory. Format follows from the extension.
   path: data/youtube_trending_cleaned_us.csv
 
 database:
   # The DSN carries a password, so it comes from $DATABASE_URL, not this file.
+  # Stops a query from pulling a whole table into memory. Context size is
+  # agent.max_result_tokens' job, not this one's.
   max_rows: 1000
   timeout: 10.0
