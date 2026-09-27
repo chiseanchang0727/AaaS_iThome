@@ -5,15 +5,19 @@ from pathlib import Path
 import yaml
 from pydantic import BaseModel, ConfigDict
 
+from .agent import AgentConfig
 from .data import DataConfig
 from .database import DatabaseConfig
+from .sandbox import SandboxConfig
 
 
 class Config(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    agent: AgentConfig
     data: DataConfig
     database: DatabaseConfig
+    sandbox: SandboxConfig
 
     @classmethod
     def load(cls, path: Path | str = "config.yml") -> "Config":

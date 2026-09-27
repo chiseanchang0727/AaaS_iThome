@@ -1,6 +1,6 @@
 """Load the CSV in `cfg.data.path` into the `videos` table.
 
-    uv run python scripts/load_csv.py
+    uv run --env-file ../.env python scripts/load_csv.py   # from backend/
 
 Full reload: TRUNCATE then COPY, in one transaction, so a failure leaves the
 old contents in place. Connects as the owner ($DATABASE_URL), not as the
@@ -34,7 +34,7 @@ async def main() -> None:
     if cfg.data.format is not DataType.CSV:
         raise SystemExit(f"{path} is not a CSV")
     if not path.exists():
-        raise SystemExit(f"{path} does not exist (run from the repo root)")
+        raise SystemExit(f"{path} does not exist (run from backend/)")
 
     dsn = os.environ.get("DATABASE_URL")
     if not dsn:

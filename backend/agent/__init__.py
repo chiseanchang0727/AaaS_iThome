@@ -1,0 +1,95 @@
+"""The deep agent, wired up from config.
+
+    from agent import build_agent
+
+    agent = build_agent()
+    result = await agent.ainvoke({"messages": [{"role": "user", "content": "..."}]})
+"""
+
+from deepagents import FilesystemPermission, create_deep_agent
+from deepagents.backends import CompositeBackend, FilesystemBackend, StateBackend
+from deepagents.backends.protocol import SandboxBackendProtocol
+
+from config import cfg
+
+from .middleware import SkillEnforcerMiddleware
+from .tools import make_export_query, query_database
+
+__all__ = ["build_agent", "SYSTEM_PROMPT", "SANDBOX_PROMPT"]
+
+SYSTEM_PROMPT = """\
+You are a data analyst for a YouTube trending-videos dataset stored in PostgreSQL.
+Answer questions by querying the database. Keep the final answer short: the
+result, then one line on how it was computed.
+
+Every claim you make about the data must rest on a result you have seen: the
+numbers, and also descriptions such as "every day", "most videos" or "none".
+If you have not seen a result that supports a statement, query for it or
+leave the statement out.
+
+When a question asks for the top or highest item, check whether others tie
+with it before answering, and name every tied item.
+"""
+
+SANDBOX_PROMPT = """
+You also have a sandbox for analysis that SQL does poorly (statistics, reshaping)
+and for charts and report files. Get data into it with export_query, which
+saves a query's rows as a Parquet file in {data_dir}; then work on it in
+Python. execute runs shell commands, not Python: write your code to a .py file
+with write_file, then run it with execute (`python3 /path/to/script.py`). Use
+polars, not pandas: load the file with `pl.read_parquet(path)`.
+Save every chart or report you make to {output_dir}: files there are handed to
+the user after the run.
+
+export_query does not show you the rows, and you cannot see charts. When you
+compute something in the sandbox, print the numbers and facts you will report.
+"""
+
+
+def build_agent(*, require_sql_skill: bool = True, sandbox: SandboxBackendProtocol | None = None):
+    """A deep agent with the database tool and the skills in `cfg.agent.skills_dir`.
+
+    Without `sandbox`, files the agent writes go to in-memory state and vanish
+    with the run, and `execute` is unavailable. With one, they live in the
+    sandbox, `execute` runs there, and export_query can put query results into
+    it. Either way /skills/ is the real directory and is read-only to the agent.
+    """
+    backend = CompositeBackend(
+        default=sandbox or StateBackend(),
+        routes={
+            "/skills/": FilesystemBackend(root_dir=cfg.agent.skills_dir, virtual_mode=True),
+        },
+    )
+    tools = [query_database]
+    system_prompt = SYSTEM_PROMPT
+    if sandbox is not None:
+        tools.append(
+            make_export_query(backend, cfg.sandbox.data_dir, cfg.sandbox.export_max_rows)
+        )
+        system_prompt += SANDBOX_PROMPT.format(
+            data_dir=cfg.sandbox.data_dir, output_dir=cfg.sandbox.output_dir
+        )
+
+    # Appended last: after_model hooks run in reverse order, so this checks
+    # the model's calls before any middleware added ahead of it.
+    middleware = (
+        [
+            SkillEnforcerMiddleware(
+                cfg.agent.skills_dir,
+                target_skills="query_database",
+                shared_skills={"export_query": "query_database"},
+            )
+        ]
+        if require_sql_skill
+        else []
+    )
+
+    return create_deep_agent(
+        model=cfg.agent.model,
+        tools=tools,
+        system_prompt=system_prompt,
+        backend=backend,
+        skills=["/skills/"],
+        permissions=[FilesystemPermission(operations=["write"], paths=["/skills/**"], mode="deny")],
+        middleware=middleware,
+    )
