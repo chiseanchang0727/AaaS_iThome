@@ -6,11 +6,14 @@ readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
     "asyncpg>=0.31.0",
+    "daytona>=0.218.0",
     "deepagents>=0.7.18",
     "ipykernel>=7.3.0",
     "langchain-anthropic>=1.7.4",
+    "langchain-daytona>=0.0.8",
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
+    "pyarrow>=25.0.1",
     "pydantic>=2.13.5",
     "pyyaml>=6.0.3",
 ]

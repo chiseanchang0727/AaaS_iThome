@@ -9,6 +9,8 @@ We already have a basic understanding of the components of Deep Agents. Today le
 
 Everything below runs against the repo from the previous posts: a Postgres table `videos` holding the US YouTube trending dataset, and the read-only `query_database()` datasource we built last time.
 
+The Python code lives in the repo's `backend/` folder (a `frontend/` comes later). File paths below are relative to `backend/`, and commands run from there.
+
 The same question goes through every stage, so we can watch the answer change:
 
 > **Which video category gets the most views?**
@@ -98,7 +100,7 @@ Output with no tools wired:
 
 ```text
 <!-- TODO: paste output of
-     uv run --env-file .env python scripts/stages.py bare -->
+     uv run --env-file ../.env python scripts/stages.py bare -->
 ```
 
 <!-- TODO (commentary): what did it do? Expected: it has filesystem tools but no
@@ -153,7 +155,7 @@ agent = create_deep_agent(
 
 ```text
 <!-- TODO: paste output of
-     uv run --env-file .env python scripts/stages.py tools -->
+     uv run --env-file ../.env python scripts/stages.py tools -->
 ```
 
 ## The trap in the question
@@ -295,7 +297,7 @@ def build_agent(*, require_sql_skill: bool = True):
 
 ```text
 <!-- TODO: paste output of
-     uv run --env-file .env python scripts/stages.py skills -->
+     uv run --env-file ../.env python scripts/stages.py skills -->
 ```
 
 <!-- TODO (commentary): did it read query_database/SKILL.md before querying? If yes, show the
@@ -442,7 +444,7 @@ And with a real model:
 
 ```text
 <!-- TODO: paste output of
-     uv run --env-file .env python scripts/stages.py forced -->
+     uv run --env-file ../.env python scripts/stages.py forced -->
 ```
 
 ## Keeping query results out of the context window

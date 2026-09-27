@@ -50,17 +50,25 @@ class PostgresSource:
     async def close(self) -> None:
         await self._pool.close()
 
-    async def query(self, sql: str) -> list[dict]:
+    async def query(self, sql: str, max_rows: int | None = None, *, raw: bool = False) -> list[dict]:
+        """Run `sql`; refuse results over `max_rows` (default: the source's cap).
+
+        Values are made JSON-safe unless `raw`, which keeps asyncpg's own types
+        (Decimal, date, datetime...) for callers that write typed formats.
+        """
+        max_rows = self._max_rows if max_rows is None else max_rows
         async with self._pool.acquire() as conn:
             # A cursor stops a LIMIT-less query from pulling the whole table
             # into memory; one row past the cap tells us it was too big.
             async with conn.transaction():
                 cursor = await conn.cursor(sql, timeout=self._timeout)
-                rows = await cursor.fetch(self._max_rows + 1, timeout=self._timeout)
+                rows = await cursor.fetch(max_rows + 1, timeout=self._timeout)
 
-        if len(rows) > self._max_rows:
+        if len(rows) > max_rows:
             raise TooManyRows(
-                f"query returned more than {self._max_rows} rows; add a LIMIT "
+                f"query returned more than {max_rows} rows; add a LIMIT "
                 f"or aggregate the results"
             )
+        if raw:
+            return [dict(row) for row in rows]
         return [{k: _jsonable(v) for k, v in row.items()} for row in rows]

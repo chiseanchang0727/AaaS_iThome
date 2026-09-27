@@ -38,11 +38,20 @@ class SkillEnforcerMiddleware(AgentMiddleware):
         skills_dir: Root directory containing skill folders.
         target_skills: Skill name(s) to enforce. If None, enforces any tool
             that has a SKILL.md file. If provided, only these are enforced.
+        shared_skills: Tools that need another tool's skill, as
+            {tool: skill_folder}; e.g. {"export_query": "query_database"}.
+            Each listed tool is enforced.
     """
 
-    def __init__(self, skills_dir: Path, target_skills: str | list[str] | None = None) -> None:
+    def __init__(
+        self,
+        skills_dir: Path,
+        target_skills: str | list[str] | None = None,
+        shared_skills: dict[str, str] | None = None,
+    ) -> None:
         super().__init__()
         self.skills_dir = Path(skills_dir)
+        self._shared = dict(shared_skills or {})
         if target_skills is None:
             self._targets: set[str] | None = None
         elif isinstance(target_skills, str):
@@ -50,9 +59,12 @@ class SkillEnforcerMiddleware(AgentMiddleware):
         else:
             self._targets = set(target_skills)
 
+    def _skill_name(self, tool_name: str) -> str:
+        return self._shared.get(tool_name, tool_name)
+
     def _skill_path(self, tool_name: str) -> Path:
         """Local FS path, used only to check the skill file exists on disk."""
-        return self.skills_dir / tool_name / "SKILL.md"
+        return self.skills_dir / self._skill_name(tool_name) / "SKILL.md"
 
     def _skill_virtual_path(self, tool_name: str) -> str:
         """Virtual path the agent reads via the /skills/ composite route.
@@ -62,9 +74,11 @@ class SkillEnforcerMiddleware(AgentMiddleware):
         the /skills/ prefix, and any other path falls through to the default
         (in-memory) backend and finds nothing.
         """
-        return f"/skills/{tool_name}/SKILL.md"
+        return f"/skills/{self._skill_name(tool_name)}/SKILL.md"
 
     def _is_enforced(self, tool_name: str) -> bool:
+        if tool_name in self._shared:
+            return True
         if self._targets is not None:
             return tool_name in self._targets
         return self._skill_path(tool_name).exists()

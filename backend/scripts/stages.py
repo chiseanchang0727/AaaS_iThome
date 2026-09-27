@@ -1,6 +1,6 @@
 """Run one article stage against the same question and print its trace.
 
-    uv run --env-file .env python scripts/stages.py bare|tools|skills|forced ["question"]
+    uv run --env-file ../.env python scripts/stages.py bare|tools|skills|forced ["question"]
 
 bare    model + system prompt only
 tools   + query_database

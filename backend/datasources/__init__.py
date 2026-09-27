@@ -26,10 +26,15 @@ async def _get_source() -> PostgresSource:
     return _source
 
 
-async def query_database(query: str) -> list[dict]:
-    """Run a read-only SQL query. The agent supplies only the query."""
+async def query_database(query: str, max_rows: int | None = None, *, raw: bool = False) -> list[dict]:
+    """Run a read-only SQL query. The agent supplies only the query.
+
+    `max_rows` overrides `cfg.database.max_rows` for callers that need more,
+    such as exporting a result to a file instead of into the agent's context.
+    `raw` keeps the database's own value types instead of JSON-safe ones.
+    """
     source = await _get_source()
-    return await source.query(query)
+    return await source.query(query, max_rows, raw=raw)
 
 
 async def close_database() -> None:

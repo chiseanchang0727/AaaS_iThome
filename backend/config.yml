@@ -8,7 +8,7 @@ agent:
 
 data:
   # Resolved against the working directory. Format follows from the extension.
-  path: data/youtube_trending_cleaned_us.csv
+  path: ../data/youtube_trending_cleaned_us.csv
 
 database:
   # The DSN carries a password, so it comes from $DATABASE_URL, not this file.
@@ -16,3 +16,19 @@ database:
   # agent.max_result_tokens' job, not this one's.
   max_rows: 1000
   timeout: 10.0
+
+sandbox:
+  # none: no code execution. Otherwise a name in sandboxes.PROVIDERS;
+  # daytona needs $DAYTONA_API_KEY. Provider settings go under `options:`.
+  provider: daytona
+
+  # Installed in every new sandbox. The agent analyses with polars.
+  packages:
+    - pyarrow
+    - polars
+
+  # Paths inside the sandbox. Home directories differ between providers.
+  data_dir: /home/daytona/data
+  output_dir: /home/daytona/outputs
+
+  export_max_rows: 100000
