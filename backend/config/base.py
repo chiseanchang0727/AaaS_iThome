@@ -9,6 +9,7 @@ from .agent import AgentConfig
 from .data import DataConfig
 from .database import DatabaseConfig
 from .sandbox import SandboxConfig
+from .server import ServerConfig
 
 
 class Config(BaseModel):
@@ -18,6 +19,7 @@ class Config(BaseModel):
     data: DataConfig
     database: DatabaseConfig
     sandbox: SandboxConfig
+    server: ServerConfig
 
     @classmethod
     def load(cls, path: Path | str = "config.yml") -> "Config":

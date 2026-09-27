@@ -223,3 +223,6 @@ __marimo__/
 
 # Personal notes, not for the repo
 notes/
+
+# Files users upload through the API
+uploads/

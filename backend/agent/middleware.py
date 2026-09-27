@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,9 @@ class SkillEnforcerMiddleware(AgentMiddleware):
         shared_skills: Tools that need another tool's skill, as
             {tool: skill_folder}; e.g. {"export_query": "query_database"}.
             Each listed tool is enforced.
+        applies_to: Only enforce calls this returns True for, given the tool
+            call dict; e.g. only SQL that touches a particular table. Every
+            call to an enforced tool when None.
     """
 
     def __init__(
@@ -48,10 +52,12 @@ class SkillEnforcerMiddleware(AgentMiddleware):
         skills_dir: Path,
         target_skills: str | list[str] | None = None,
         shared_skills: dict[str, str] | None = None,
+        applies_to: Callable[[dict], bool] | None = None,
     ) -> None:
         super().__init__()
         self.skills_dir = Path(skills_dir)
         self._shared = dict(shared_skills or {})
+        self._applies_to = applies_to
         if target_skills is None:
             self._targets: set[str] | None = None
         elif isinstance(target_skills, str):
@@ -155,7 +161,9 @@ class SkillEnforcerMiddleware(AgentMiddleware):
         blocked = {
             tc["id"]
             for tc in last_ai_msg.tool_calls
-            if self._is_enforced(tc["name"]) and not self._skill_was_read(tc["name"], messages)
+            if self._is_enforced(tc["name"])
+            and (self._applies_to is None or self._applies_to(tc))
+            and not self._skill_was_read(tc["name"], messages)
         }
         if not blocked:
             return None

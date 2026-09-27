@@ -5,6 +5,7 @@ import os
 from pydantic import BaseModel, ConfigDict
 
 DSN_ENV = "AGENT_DATABASE_URL"
+INGEST_DSN_ENV = "INGEST_DATABASE_URL"
 
 
 class DatabaseConfig(BaseModel):
@@ -35,3 +36,15 @@ class DatabaseConfig(BaseModel):
             return os.environ[DSN_ENV]
         except KeyError:
             raise RuntimeError(f"{DSN_ENV} is not set") from None
+
+    @property
+    def ingest_dsn(self) -> str:
+        """The connection that creates tables from uploads.
+
+        Its role can create tables and grant SELECT on them to the agent's
+        role, and can touch nothing else: it holds no rights on `videos`.
+        """
+        try:
+            return os.environ[INGEST_DSN_ENV]
+        except KeyError:
+            raise RuntimeError(f"{INGEST_DSN_ENV} is not set") from None
