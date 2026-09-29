@@ -22,13 +22,23 @@ sandbox:
   # daytona needs $DAYTONA_API_KEY. Provider settings go under `options:`.
   provider: daytona
 
-  # Installed in every new sandbox. The agent analyses with polars.
+  # Installed in every new sandbox. The agent analyses with polars and charts
+  # with plotly (interactive HTML the frontend renders).
   packages:
     - pyarrow
     - polars
+    - plotly
 
   # Paths inside the sandbox. Home directories differ between providers.
   data_dir: /home/daytona/data
   output_dir: /home/daytona/outputs
 
   export_max_rows: 100000
+
+server:
+  # Relative to backend/. reports/ and uploads/ are git-ignored.
+  artifacts_dir: reports/artifacts
+  uploads_dir: uploads
+  # Each open conversation keeps a sandbox (billed) until idle this long.
+  sandbox_idle_minutes: 15
+  max_upload_mb: 50

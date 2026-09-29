@@ -11,7 +11,8 @@ from .base import Config
 from .data import DataConfig, DataType
 from .database import DatabaseConfig
 from .sandbox import SandboxConfig
+from .server import ServerConfig
 
-__all__ = ["AgentConfig", "Config", "DataConfig", "DataType", "DatabaseConfig", "SandboxConfig", "cfg"]
+__all__ = ["AgentConfig", "Config", "DataConfig", "DataType", "DatabaseConfig", "SandboxConfig", "ServerConfig", "cfg"]
 
 cfg = Config.load()

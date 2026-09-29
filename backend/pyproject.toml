@@ -8,18 +8,23 @@ dependencies = [
     "asyncpg>=0.31.0",
     "daytona>=0.218.0",
     "deepagents>=0.7.18",
+    "fastapi>=0.141.1",
     "ipykernel>=7.3.0",
     "langchain-anthropic>=1.7.4",
     "langchain-daytona>=0.0.8",
     "matplotlib>=3.11.2",
     "pandas>=3.0.6",
+    "polars>=1.44.2",
     "pyarrow>=25.0.1",
     "pydantic>=2.13.5",
+    "python-multipart>=0.0.32",
     "pyyaml>=6.0.3",
+    "uvicorn[standard]>=0.54.0",
 ]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28.1",
     "pytest>=9.1.1",
 ]
 

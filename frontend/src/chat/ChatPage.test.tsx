@@ -1,0 +1,106 @@
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+
+import { jsonResponse, mockFetch, sseResponse } from '../test/fetch'
+import { ChatPage } from './ChatPage'
+
+const TURN = [
+  { type: 'thread', thread_id: 'thread-1' },
+  { type: 'tool_call', id: 'c1', name: 'query_database', args: { sql: 'SELECT category_name FROM videos' } },
+  { type: 'tool_result', id: 'c1', name: 'query_database', content: '[{"category_name":"Gaming"}]', error: false },
+  { type: 'answer', text: '**Gaming** leads with 1.32M.' },
+  { type: 'artifact', name: 'chart.html', url: '/api/artifacts/thread-1/chart.html', kind: 'html' },
+  { type: 'done' },
+]
+
+afterEach(() => vi.unstubAllGlobals())
+
+async function ask(text: string) {
+  await userEvent.type(screen.getByLabelText('Message'), `${text}{Enter}`)
+}
+
+describe('ChatPage', () => {
+  it('streams a turn: steps, markdown answer and chart', async () => {
+    mockFetch(() => sseResponse(TURN))
+    render(<ChatPage />)
+    await ask('Which category leads?')
+
+    expect(await screen.findByText('Gaming', { selector: 'strong' })).toBeInTheDocument()
+    expect(screen.getByText('Which category leads?')).toBeInTheDocument()
+    expect(screen.getByText('SELECT category_name FROM videos')).toBeInTheDocument()
+    expect(screen.getByText('1 step')).toBeInTheDocument()
+  })
+
+  it('renders agent HTML in a sandboxed iframe that cannot reach the app', async () => {
+    mockFetch(() => sseResponse(TURN))
+    render(<ChatPage />)
+    await ask('chart please')
+
+    const frame = await screen.findByTitle('chart.html')
+    expect(frame.tagName).toBe('IFRAME')
+    expect(frame).toHaveAttribute('src', '/api/artifacts/thread-1/chart.html')
+    expect(frame.getAttribute('sandbox')).toBe('allow-scripts')
+    expect(frame.getAttribute('sandbox')).not.toContain('allow-same-origin')
+  })
+
+  it('sends follow-ups in the same conversation', async () => {
+    const calls = mockFetch(() => sseResponse(TURN))
+    render(<ChatPage />)
+    await ask('first')
+    await screen.findByTitle('chart.html')
+    await ask('second')
+    await waitFor(() => expect(calls).toHaveLength(2))
+
+    expect(calls[0].body).toEqual({ message: 'first' })
+    expect(calls[1].body).toEqual({ message: 'second', thread_id: 'thread-1' })
+  })
+
+  it('shows why a message was refused', async () => {
+    mockFetch(() => jsonResponse({ detail: 'this conversation is still answering a message' }, 409))
+    render(<ChatPage />)
+    await ask('hi')
+
+    expect(await screen.findByText(/still answering a message/)).toBeInTheDocument()
+    expect(screen.getByLabelText('Message')).not.toBeDisabled()
+  })
+
+  it('shows an error from the stream', async () => {
+    mockFetch(() => sseResponse([{ type: 'thread', thread_id: 't' }, { type: 'error', message: 'model unavailable' }, { type: 'done' }]))
+    render(<ChatPage />)
+    await ask('hi')
+    expect(await screen.findByText(/model unavailable/)).toBeInTheDocument()
+  })
+
+  it('does not render HTML the model writes in its answer', async () => {
+    mockFetch(() =>
+      sseResponse([{ type: 'thread', thread_id: 't' }, { type: 'answer', text: 'hi <img src=x onerror=alert(1)>' }, { type: 'done' }]),
+    )
+    const { container } = render(<ChatPage />)
+    await ask('hi')
+    await screen.findByText(/hi/, { selector: 'p' })
+    expect(container.querySelector('.answer img')).toBeNull()
+  })
+
+  it('new conversation ends the old one and clears the chat', async () => {
+    const calls = mockFetch((call) => (call.method === 'DELETE' ? jsonResponse({ closed: true }) : sseResponse(TURN)))
+    render(<ChatPage />)
+    await ask('first')
+    await screen.findByTitle('chart.html')
+
+    await userEvent.click(screen.getByRole('button', { name: 'New conversation' }))
+    expect(calls.at(-1)).toMatchObject({ url: '/api/conversations/thread-1', method: 'DELETE' })
+    expect(screen.queryByText('first')).toBeNull()
+
+    await ask('fresh start')
+    await waitFor(() => expect(calls.at(-1)?.body).toEqual({ message: 'fresh start' }))
+  })
+
+  it('Shift+Enter adds a line instead of sending', async () => {
+    const calls = mockFetch(() => sseResponse(TURN))
+    render(<ChatPage />)
+    await userEvent.type(screen.getByLabelText('Message'), 'line one{Shift>}{Enter}{/Shift}line two')
+    expect(calls).toHaveLength(0)
+    expect(screen.getByLabelText('Message')).toHaveValue('line one\nline two')
+  })
+})
