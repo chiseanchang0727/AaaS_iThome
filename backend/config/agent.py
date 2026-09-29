@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class SkillRouterConfig(BaseModel):
@@ -11,8 +11,12 @@ class SkillRouterConfig(BaseModel):
     model: str = "jev-1.13.0"
     """TypeSafe model id. Pinned: a new version can move the probabilities."""
 
+    top_n: int = Field(default=1, ge=1)
+    """Name at most this many skills per user message."""
+
     multi: bool = False
-    """Also name a second or third skill when a second request confirms it."""
+    """How to pick past the first skill. False: the `top_n` most likely.
+    True: a second request checks places 2..top_n and keeps those it confirms."""
 
 
 class AgentConfig(BaseModel):

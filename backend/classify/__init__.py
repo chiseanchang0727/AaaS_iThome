@@ -1,5 +1,5 @@
-"""Classifiers that sort an input into a fixed set of labels."""
+"""Judge an input against a set of labels: pick one, check each, or score each."""
 
-from .jev_classifier import NONE, Classification, JevClassifier
+from .jev_classifier import NONE, Classification, JevJudge, Level
 
-__all__ = ["Classification", "JevClassifier", "NONE"]
+__all__ = ["Classification", "JevJudge", "Level", "NONE"]

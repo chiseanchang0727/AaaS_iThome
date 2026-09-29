@@ -108,9 +108,9 @@ def picks(skill: str) -> SimpleNamespace:
     return choice(**{skill: 0.9, **rest})
 
 
-def router(skills_dir, *responses, multi=False) -> SkillRouterMiddleware:
+def router(skills_dir, *responses, top_n=1, multi=False) -> SkillRouterMiddleware:
     classifier = build_classifier(skills_dir, model="jev-1.13.0", client=FakeClient(*responses))
-    return SkillRouterMiddleware(classifier, multi=multi)
+    return SkillRouterMiddleware(classifier, top_n=top_n, multi=multi)
 
 
 def run(coro):
@@ -156,6 +156,13 @@ def test_before_agent_keeps_the_pick_in_state(skills_dir):
     assert run(mw.abefore_agent(state, None)) == {"relevant_skills": ["trend-report"]}
 
 
+def test_top_n_names_that_many_skills(skills_dir):
+    ranked = choice(**{"forecast": 0.6, "chart-interactive": 0.3, "correlation": 0.08, "none": 0.02})
+    mw = router(skills_dir, ranked, top_n=2)
+    state = {"messages": [HumanMessage("Forecast next month and chart it")]}
+    assert run(mw.abefore_agent(state, None)) == {"relevant_skills": ["forecast", "chart-interactive"]}
+
+
 def test_nothing_fits_means_no_skills(skills_dir):
     mw = router(skills_dir, picks(NONE))
     assert run(mw.abefore_agent({"messages": [HumanMessage("hi")]}, None)) == {"relevant_skills": []}
@@ -165,7 +172,7 @@ def test_multi_also_keeps_a_confirmed_runner_up(skills_dir):
     both = choice(**{"forecast": 0.7, "chart-interactive": 0.25, "correlation": 0.05})
     confirmed = SimpleNamespace(nouls={"chart-interactive": SimpleNamespace(noul=0.97),
                                        "correlation": SimpleNamespace(noul=0.1)})
-    mw = router(skills_dir, both, confirmed, multi=True)
+    mw = router(skills_dir, both, confirmed, top_n=3, multi=True)
     state = {"messages": [HumanMessage("Forecast next month and chart it")]}
     assert run(mw.abefore_agent(state, None)) == {"relevant_skills": ["forecast", "chart-interactive"]}
 
@@ -252,7 +259,7 @@ def test_live_router_picks_the_right_mock_skill(skills_dir):
     classifier = build_classifier(skills_dir, model="jev-1.13.0")
 
     async def classify_all():
-        return await asyncio.gather(*(classifier.classify(build_state([HumanMessage(q)])) for q, _ in LABELLED))
+        return await asyncio.gather(*(classifier.classify(build_state([HumanMessage(q)]), question=QUESTION, none=NONE_DESCRIPTION) for q, _ in LABELLED))
 
     results = run(classify_all())
     for (request, want), result in zip(LABELLED, results):

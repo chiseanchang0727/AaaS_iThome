@@ -10,6 +10,8 @@ agent:
   # Needs $TYPESAFE_API_KEY.
   skill_router:
     model: jev-1.13.0
+    # At most this many skills per user message.
+    top_n: 1
     multi: false
 
 data:

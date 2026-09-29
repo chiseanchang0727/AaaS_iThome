@@ -82,7 +82,7 @@ def skill_router() -> SkillRouterMiddleware | None:
         log.warning("agent.skill_router is set but $TYPESAFE_API_KEY is not; routing is off")
         return None
     classifier = build_classifier(cfg.agent.skills_dir, model=settings.model)
-    return SkillRouterMiddleware(classifier, multi=settings.multi)
+    return SkillRouterMiddleware(classifier, top_n=settings.top_n, multi=settings.multi)
 
 
 def build_agent(

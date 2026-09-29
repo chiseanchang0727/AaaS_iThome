@@ -1,39 +1,39 @@
-"""Sort any input into a fixed set of labels with Jev (TypeSafe).
+"""Judge any input against a set of labels with Jev (TypeSafe), one method per answer type.
 
 This module only asks and reads answers. What goes in (the state, the
-question, the label descriptions) is the caller's job: see
+questions, the label descriptions) is the caller's job: see
 agent/skill_router.py for one caller.
 
-    from classify import JevClassifier
+    jev = JevJudge({"billing": "Charges, refunds", "shipping": "Delivery"})
+    state = {"ticket": "I was charged twice and the parcel is late."}
 
-    teams = JevClassifier(
-        {"billing": "Charges, invoices, refunds", "shipping": "Delivery, delays"},
-        question="Which team should handle `ticket`?",
-        none="Neither team handles this.",
-    )
-    result = await teams.classify({"ticket": "I was charged twice."})
-    result.top            # "billing", or None when nothing fits
-    result.probabilities  # every label, most likely first
+    # Choice: which ONE label fits? The labels compete; probabilities sum to 1.
+    await jev.classify(state, question="Which team should handle `ticket`?")
 
-One Choice question ranks every label at once (up to 255). With `none` set,
-the model can also say nothing fits. `select` adds a second request for inputs
-that need several labels: it keeps the top label and asks, label by label,
-whether each runner-up applies too.
+    # Noul: does EACH label apply? Judged one by one; any number can be yes.
+    await jev.check_each(state, question="Does `ticket` need the {name} team ({description})?")
 
-On a 50-skill roster and 65 labelled requests (jev-1.13), `classify` put the
-right skill first on 54 of 55 covered requests and said "none" on 9 of 10 that
-no skill covered, in one ~0.3 s request.
+    # Score: how much does EACH label apply, on levels you describe?
+    await jev.score_each(state, question="How urgent is `ticket` for {name}?",
+                         levels=["can wait", "this week", "today"])
+
+`check_each` and `score_each` send one question per label, all in one
+request: Jev reads the state once and answers them in parallel.
+
+Measured with jev-1.13: `classify` put the right skill first on 54 of 55
+requests (50 skills); one `check_each` request kept 24 of 25 needed
+conversation turns and no unneeded ones (10 turns, 18 follow-ups).
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 
-from typesafe_sdk import AsyncTypeSafeClient, Choice, JSONContent, Noul
+from typesafe_sdk import AsyncTypeSafeClient, Choice, JSONContent, Noul, Score
 
-__all__ = ["Classification", "JevClassifier", "NONE"]
+__all__ = ["Classification", "JevJudge", "Level", "NONE"]
 
 NONE = "none"
-"""The option that means no label fits. Never a label of its own."""
+"""`classify`'s option that means no label fits. Never a label of its own."""
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,8 @@ class Classification:
     """How concentrated `probabilities` is, 0 to 1. Low when labels compete."""
 
     selected: list[str] = field(default_factory=list)
-    """The labels that apply: the top one, plus any `select` confirmed."""
+    """The labels that apply: `classify`'s top ones, or `select`'s top one plus
+    the runners-up it confirmed."""
 
     checks: dict[str, float] = field(default_factory=dict)
     """`select` only: the probability each runner-up applies, by label."""
@@ -57,21 +58,30 @@ class Classification:
         return None if best == NONE else best
 
 
-class JevClassifier:
-    """Sorts inputs into `labels`, a {name: description} map.
+@dataclass(frozen=True)
+class Level:
+    """One label's `score_each` answer."""
+
+    score: float
+    """Position on the levels, 0 to len(levels) - 1; can fall between two."""
+
+    confidence: float
+    """How concentrated `probabilities` is, 0 to 1."""
+
+    probabilities: dict[int, float]
+    """Probability of each level, by its index in `levels`."""
+
+
+class JevJudge:
+    """Judges inputs against `labels`, a {name: description} map.
 
     Args:
-        labels: Option name -> what it covers. The model reads both, so write
-            descriptions that tell neighbouring labels apart.
-        question: What to decide, e.g. "Which skill should handle `request`?".
-            Refer to parts of the state by backticked name.
-        none: What the "nothing fits" option means, or None to force a label
-            on every input.
-        verify: `select`'s per-label yes/no question, formatted with `name`
-            and `description`. Needed only for `select`.
-        verify_criteria: {"true": ..., "false": ...}: what yes and no mean.
-        client: Shared client. By default one is made per classifier, reading
-            $TYPESAFE_API_KEY.
+        labels: Label name -> what it covers. The model reads the description,
+            so write ones that tell neighbouring labels apart. For items that
+            live in the state (e.g. conversation turns), the description can
+            point there: {"turn_1": "`earlier_turns[0]`"}.
+        client: Shared client. By default one is made per instance, reading
+            $TYPESAFE_API_KEY. Share one when making instances per request.
         model: A pinned model id, so thresholds tuned on it keep their meaning.
     """
 
@@ -79,10 +89,6 @@ class JevClassifier:
         self,
         labels: Mapping[str, str],
         *,
-        question: str,
-        none: str | None = None,
-        verify: str | None = None,
-        verify_criteria: Mapping[str, str] | None = None,
         client: AsyncTypeSafeClient | None = None,
         model: str = "jev-1.13.0",
     ) -> None:
@@ -93,54 +99,151 @@ class JevClassifier:
         self.labels = dict(labels)
         self.model = model
         self._client = client or AsyncTypeSafeClient()
-        self._verify = verify
-        self._verify_criteria = dict(verify_criteria) if verify_criteria else None
+
+    # --- Choice ------------------------------------------------------------
+
+    async def classify(
+        self,
+        state: JSONContent,
+        *,
+        question: str,
+        none: str | None = None,
+        top_n: int = 1,
+    ) -> Classification:
+        """Which label fits best? One Choice over every label.
+
+        Args:
+            question: What to decide, e.g. "Which skill should handle `request`?".
+                Refer to parts of the state by backticked name.
+            none: What the "nothing fits" option means, or None to force a
+                label on every input.
+            top_n: `selected` holds up to this many labels, most likely first,
+                but never one ranked below `NONE`.
+        """
+        if top_n < 1:
+            raise ValueError("top_n must be at least 1")
         criteria = dict(self.labels)
         if none is not None:
             criteria[NONE] = none
-        self._choice = Choice(instructions=question, criteria=criteria)
-
-    async def classify(self, state: JSONContent) -> Classification:
-        """Rank every label against `state` (a string or a JSON object)."""
         response = await self._client.system_one(
-            state=state, questions={"which": self._choice}, model=self.model
+            state=state,
+            questions={"which": Choice(instructions=question, criteria=criteria)},
+            model=self.model,
         )
         answer = response.choices["which"]
         ranked = dict(sorted(answer.probabilities.items(), key=lambda kv: -kv[1]))
-        best = next(iter(ranked))
-        return Classification(ranked, answer.confidence, [] if best == NONE else [best])
+        above_none = []
+        for name in ranked:
+            if name == NONE or len(above_none) == top_n:
+                break
+            above_none.append(name)
+        return Classification(ranked, answer.confidence, above_none)
+
+    # --- Noul --------------------------------------------------------------
+
+    async def check_each(
+        self,
+        state: JSONContent,
+        *,
+        question: str,
+        criteria: Mapping[str, str] | None = None,
+        only: Sequence[str] | None = None,
+    ) -> dict[str, float]:
+        """Does each label apply? One yes/no question per label, one request.
+
+        Args:
+            question: Formatted per label with `name` and `description`, e.g.
+                "Does `request` need {description}?".
+            criteria: {"true": ..., "false": ...}: what yes and no mean.
+            only: Ask about these labels only (default: all).
+
+        Returns:
+            {label: probability of yes}, in label order. Unlike `classify`,
+            these do not compete: all can be high, or all low.
+        """
+        names = list(only) if only is not None else list(self.labels)
+        questions = {
+            name: Noul(
+                instructions=question.format(name=name, description=self.labels[name]),
+                criteria=dict(criteria) if criteria else None,
+            )
+            for name in names
+        }
+        response = await self._client.system_one(
+            state=state, questions=questions, model=self.model
+        )
+        return {name: response.nouls[name].noul for name in names}
+
+    # --- Score -------------------------------------------------------------
+
+    async def score_each(
+        self,
+        state: JSONContent,
+        *,
+        question: str,
+        levels: Sequence[str],
+        only: Sequence[str] | None = None,
+    ) -> dict[str, Level]:
+        """How much does each label apply? One Score per label, one request.
+
+        Args:
+            question: Formatted per label with `name` and `description`.
+            levels: 2 to 10 descriptions, lowest first. Each must stand on its
+                own: the model reads them, not their position.
+            only: Ask about these labels only (default: all).
+        """
+        if not 2 <= len(levels) <= 10:
+            raise ValueError("a Score needs 2 to 10 levels")
+        names = list(only) if only is not None else list(self.labels)
+        questions = {
+            name: Score(
+                instructions=question.format(name=name, description=self.labels[name]),
+                criteria=list(levels),
+            )
+            for name in names
+        }
+        response = await self._client.system_one(
+            state=state, questions=questions, model=self.model
+        )
+        return {
+            name: Level(
+                score=answer.score,
+                confidence=answer.confidence,
+                probabilities={int(k): v for k, v in answer.probabilities.items()},
+            )
+            for name in names
+            for answer in [response.scores[name]]
+        }
+
+    # --- Choice, then Noul -------------------------------------------------
 
     async def select(
-        self, state: JSONContent, *, shortlist: int = 3, threshold: float = 0.9
+        self,
+        state: JSONContent,
+        *,
+        question: str,
+        verify: str,
+        verify_criteria: Mapping[str, str] | None = None,
+        none: str | None = None,
+        shortlist: int = 3,
+        threshold: float = 0.9,
     ) -> Classification:
-        """`classify`, then also keep runners-up that apply on their own.
+        """`classify`, then keep runners-up that also apply on their own.
 
         The top label is always kept (unless it is `NONE`: then nothing is).
-        The next `shortlist - 1` labels each get the `verify` question, and
-        those at or above `threshold` join it. A runner-up often gets little of
-        the Choice's probability even when it applies, because the Choice
-        splits probability between labels; the yes/no question judges it alone.
+        Places 2..`shortlist` go through `check_each` with `verify`, and those
+        at or above `threshold` join it. Two requests.
         """
-        if self._verify is None:
-            raise ValueError("select needs a `verify` question")
-        first = await self.classify(state)
+        first = await self.classify(state, question=question, none=none)
         if first.top is None:
             return first
         runners_up = [n for n in first.probabilities if n not in (NONE, first.top)]
         runners_up = runners_up[: shortlist - 1]
         if not runners_up:
             return first
-        questions = {
-            name: Noul(
-                instructions=self._verify.format(name=name, description=self.labels[name]),
-                criteria=self._verify_criteria,
-            )
-            for name in runners_up
-        }
-        response = await self._client.system_one(
-            state=state, questions=questions, model=self.model
+        checks = await self.check_each(
+            state, question=verify, criteria=verify_criteria, only=runners_up
         )
-        checks = {name: response.nouls[name].noul for name in runners_up}
         extra = [name for name in runners_up if checks[name] >= threshold]
         return Classification(
             first.probabilities, first.confidence, [first.top, *extra], checks

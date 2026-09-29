@@ -1,7 +1,8 @@
 """Names the skills relevant to each user message, before the agent starts on it.
 
 Everything the classifier reads is built here: the labels (`load_skills`), the
-state (`build_state`) and the wording (the constants below). The classifier
+state (`build_state`) and the wording (the constants below, passed in by
+`pick_skills`). The classifier
 itself, classify/jev_classifier.py, knows nothing about skills.
 """
 
@@ -18,7 +19,7 @@ from langchain_core.messages import AnyMessage, HumanMessage, SystemMessage
 from langgraph.runtime import Runtime
 from typesafe_sdk import AsyncTypeSafeClient
 
-from classify import JevClassifier
+from classify import JevJudge
 
 log = logging.getLogger(__name__)
 
@@ -62,17 +63,33 @@ def build_state(messages: list[AnyMessage]) -> dict[str, str] | None:
 
 def build_classifier(
     skills_dir: Path, *, model: str, client: AsyncTypeSafeClient | None = None
-) -> JevClassifier:
-    """A classifier over every skill in `skills_dir`, with this module's wording."""
-    return JevClassifier(
-        load_skills(skills_dir),
-        question=QUESTION,
-        none=NONE_DESCRIPTION,
-        verify=VERIFY,
-        verify_criteria=VERIFY_CRITERIA,
-        model=model,
-        client=client,
-    )
+) -> JevJudge:
+    """A classifier whose labels are every skill in `skills_dir`."""
+    return JevJudge(load_skills(skills_dir), model=model, client=client)
+
+
+async def pick_skills(
+    classifier: JevJudge, state: dict[str, str], *, top_n: int = 1, multi: bool = False
+) -> list[str]:
+    """The skills for `state`, asked with this module's wording.
+
+    multi=False: the `top_n` most likely (one request). multi=True: the most
+    likely, plus places 2..`top_n` that a yes/no check confirms (two requests).
+    """
+    if multi:
+        result = await classifier.select(
+            state,
+            question=QUESTION,
+            none=NONE_DESCRIPTION,
+            verify=VERIFY,
+            verify_criteria=VERIFY_CRITERIA,
+            shortlist=top_n,
+        )
+    else:
+        result = await classifier.classify(
+            state, question=QUESTION, none=NONE_DESCRIPTION, top_n=top_n
+        )
+    return result.selected
 
 
 class SkillRouterState(AgentState):
@@ -94,14 +111,18 @@ class SkillRouterMiddleware(AgentMiddleware):
 
     Args:
         classifier: Usually `build_classifier(skills_dir, model=...)`.
-        multi: Also name runners-up a second request confirms (`Classifier.select`).
+        top_n: Name at most this many skills.
+        multi: How to pick beyond the first. False: take the `top_n` most likely.
+            True: take the first, then check places 2..`top_n` with a second
+            request and keep those it confirms (`JevJudge.select`).
     """
 
     state_schema = SkillRouterState
 
-    def __init__(self, classifier: JevClassifier, *, multi: bool = False) -> None:
+    def __init__(self, classifier: JevJudge, *, top_n: int = 1, multi: bool = False) -> None:
         super().__init__()
         self.classifier = classifier
+        self.top_n = top_n
         self.multi = multi
 
     async def abefore_agent(self, state: AgentState, runtime: Runtime) -> dict[str, Any] | None:
@@ -109,14 +130,13 @@ class SkillRouterMiddleware(AgentMiddleware):
         if classifier_state is None:
             return None
         try:
-            if self.multi:
-                result = await self.classifier.select(classifier_state)
-            else:
-                result = await self.classifier.classify(classifier_state)
+            skills = await pick_skills(
+                self.classifier, classifier_state, top_n=self.top_n, multi=self.multi
+            )
         except Exception:
             log.warning("skill routing failed; running without a suggestion", exc_info=True)
             return {"relevant_skills": []}
-        return {"relevant_skills": result.selected}
+        return {"relevant_skills": skills}
 
     async def awrap_model_call(
         self,
