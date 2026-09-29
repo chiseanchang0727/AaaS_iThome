@@ -226,3 +226,6 @@ notes/
 
 # Files users upload through the API
 uploads/
+
+# Article drafts, kept locally
+articles/
