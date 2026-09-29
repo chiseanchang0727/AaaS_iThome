@@ -3,7 +3,7 @@
 Everything the classifier reads is built here: the labels (`load_skills`), the
 state (`build_state`) and the wording (the constants below, passed in by
 `pick_skills`). The classifier
-itself, classify/jev_classifier.py, knows nothing about skills.
+itself, classify/jev_judge.py, knows nothing about skills.
 """
 
 from __future__ import annotations
