@@ -5,6 +5,12 @@ agent:
   # A tool result bigger than this is refused rather than put into the model's
   # context. Approximate: ~4 characters per token.
   max_result_tokens: 5000
+  # Classifies each user message against the skills (TypeSafe) and names the
+  # relevant ones in the system prompt. Delete the section to turn it off.
+  # Needs $TYPESAFE_API_KEY.
+  skill_router:
+    model: jev-1.13.0
+    multi: false
 
 data:
   # Resolved against the working directory. Format follows from the extension.
