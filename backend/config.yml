@@ -44,9 +44,11 @@ sandbox:
   export_max_rows: 100000
 
 server:
-  # Relative to backend/. reports/ and uploads/ are git-ignored.
+  # Relative to backend/. reports/, uploads/ and conversations/ are git-ignored.
   artifacts_dir: reports/artifacts
   uploads_dir: uploads
+  # One <thread_id>.jsonl per conversation, one line per message.
+  history_dir: conversations
   # Each open conversation keeps a sandbox (billed) until idle this long.
   sandbox_idle_minutes: 15
   max_upload_mb: 50

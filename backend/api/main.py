@@ -14,6 +14,7 @@ from sandboxes import get_provider
 from .app import create_app
 from .conversations import ConversationManager
 from .datasets import datasets_router, upload_files_hook
+from .history import HistoryStore
 
 store = DatasetStore(
     cfg.server.uploads_dir,
@@ -35,4 +36,5 @@ app = create_app(
     output_dir=cfg.sandbox.output_dir,
     on_shutdown=close_database,
     routers=[datasets_router(store, cfg.sandbox.data_dir, manager.live_sandboxes)],
+    history=HistoryStore(cfg.server.history_dir),
 )

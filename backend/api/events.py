@@ -8,10 +8,10 @@
 """
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from typing import Any
 
-from langchain_core.messages import AIMessage, ToolMessage
+from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
 MAX_STEPS = 40
@@ -38,8 +38,16 @@ def _clip(text: str) -> str:
     return text if len(text) <= RESULT_CHARS else text[:RESULT_CHARS] + f"\n… ({len(text):,} characters)"
 
 
-async def run_turn(agent, thread_id: str, message: str) -> AsyncIterator[dict]:
-    """Run one user message through `agent` in conversation `thread_id`."""
+async def run_turn(
+    agent,
+    thread_id: str,
+    message: str,
+    on_message: Callable[[BaseMessage], None] | None = None,
+) -> AsyncIterator[dict]:
+    """Run one user message through `agent` in conversation `thread_id`.
+
+    `on_message` sees every message the agent adds, unclipped, as it arrives.
+    """
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": MAX_STEPS}
     answer = ""
     try:
@@ -48,6 +56,8 @@ async def run_turn(agent, thread_id: str, message: str) -> AsyncIterator[dict]:
         ):
             for payload in update.values():
                 for m in _messages(payload):
+                    if on_message is not None:
+                        on_message(m)
                     if isinstance(m, AIMessage):
                         text = text_of(m).strip()
                         if not m.tool_calls:

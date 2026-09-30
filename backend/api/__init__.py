@@ -2,5 +2,6 @@
 
 from .app import create_app
 from .conversations import Conversation, ConversationManager
+from .history import HistoryStore
 
-__all__ = ["Conversation", "ConversationManager", "create_app"]
+__all__ = ["Conversation", "ConversationManager", "HistoryStore", "create_app"]

@@ -15,6 +15,10 @@ class ServerConfig(BaseModel):
     uploads_dir: Path
     """Where uploaded files and the dataset registry live."""
 
+    history_dir: Path
+    """Where each conversation's history is written, one JSONL file per
+    conversation (api/history.py)."""
+
     sandbox_idle_minutes: float
     """A conversation's sandbox is deleted after this long without a message."""
 

@@ -24,6 +24,7 @@ from sandboxes import download_outputs
 
 from .conversations import ConversationManager
 from .events import run_turn, sse
+from .history import HistoryStore
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
@@ -48,6 +49,7 @@ def create_app(
     reap_every_seconds: float = 60,
     on_shutdown=None,
     routers: Sequence[APIRouter] = (),
+    history: HistoryStore | None = None,
 ) -> FastAPI:
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -96,7 +98,9 @@ def create_app(
 
         async with conversation.lock:
             try:
-                async for event in run_turn(conversation.agent, thread_id, message):
+                log = history.start_turn(thread_id, message) if history is not None else None
+                on_message = log.record if log is not None else None
+                async for event in run_turn(conversation.agent, thread_id, message, on_message):
                     yield sse(event)
                 if conversation.sandbox is not None:
                     for event in await _collect_artifacts(conversation, thread_id):
