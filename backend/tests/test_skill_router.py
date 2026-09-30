@@ -259,7 +259,7 @@ def test_live_router_picks_the_right_mock_skill(skills_dir):
     classifier = build_classifier(skills_dir, model="jev-1.13.0")
 
     async def classify_all():
-        return await asyncio.gather(*(classifier.classify(build_state([HumanMessage(q)]), question=QUESTION, none=NONE_DESCRIPTION) for q, _ in LABELLED))
+        return await asyncio.gather(*(classifier.choice(build_state([HumanMessage(q)]), question=QUESTION, none=NONE_DESCRIPTION) for q, _ in LABELLED))
 
     results = run(classify_all())
     for (request, want), result in zip(LABELLED, results):

@@ -86,7 +86,7 @@ async def pick_skills(
             shortlist=top_n,
         )
     else:
-        result = await classifier.classify(
+        result = await classifier.choice(
             state, question=QUESTION, none=NONE_DESCRIPTION, top_n=top_n
         )
     return result.selected

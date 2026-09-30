@@ -8,20 +8,20 @@ agent/skill_router.py for one caller.
     state = {"ticket": "I was charged twice and the parcel is late."}
 
     # Choice: which ONE label fits? The labels compete; probabilities sum to 1.
-    await jev.classify(state, question="Which team should handle `ticket`?")
+    await jev.choice(state, question="Which team should handle `ticket`?")
 
     # Noul: does EACH label apply? Judged one by one; any number can be yes.
-    await jev.check_each(state, question="Does `ticket` need the {name} team ({description})?")
+    await jev.noul(state, question="Does `ticket` need the {name} team ({description})?")
 
     # Score: how much does EACH label apply, on levels you describe?
-    await jev.score_each(state, question="How urgent is `ticket` for {name}?",
-                         levels=["can wait", "this week", "today"])
+    await jev.score(state, question="How urgent is `ticket` for {name}?",
+                    levels=["can wait", "this week", "today"])
 
-`check_each` and `score_each` send one question per label, all in one
-request: Jev reads the state once and answers them in parallel.
+`noul` and `score` send one question per label, all in one request:
+Jev reads the state once and answers them in parallel.
 
-Measured with jev-1.13: `classify` put the right skill first on 54 of 55
-requests (50 skills); one `check_each` request kept 24 of 25 needed
+Measured with jev-1.13: `choice` put the right skill first on 54 of 55
+requests (50 skills); one `noul` request kept 24 of 25 needed
 conversation turns and no unneeded ones (10 turns, 18 follow-ups).
 """
 
@@ -33,7 +33,7 @@ from typesafe_sdk import AsyncTypeSafeClient, Choice, JSONContent, Noul, Score
 __all__ = ["Classification", "JevJudge", "Level", "NONE"]
 
 NONE = "none"
-"""`classify`'s option that means no label fits. Never a label of its own."""
+"""`choice`'s option that means no label fits. Never a label of its own."""
 
 
 @dataclass(frozen=True)
@@ -45,7 +45,7 @@ class Classification:
     """How concentrated `probabilities` is, 0 to 1. Low when labels compete."""
 
     selected: list[str] = field(default_factory=list)
-    """The labels that apply: `classify`'s top ones, or `select`'s top one plus
+    """The labels that apply: `choice`'s top ones, or `select`'s top one plus
     the runners-up it confirmed."""
 
     checks: dict[str, float] = field(default_factory=dict)
@@ -60,7 +60,7 @@ class Classification:
 
 @dataclass(frozen=True)
 class Level:
-    """One label's `score_each` answer."""
+    """One label's `score` answer."""
 
     score: float
     """Position on the levels, 0 to len(levels) - 1; can fall between two."""
@@ -102,7 +102,7 @@ class JevJudge:
 
     # --- Choice ------------------------------------------------------------
 
-    async def classify(
+    async def choice(
         self,
         state: JSONContent,
         *,
@@ -141,7 +141,7 @@ class JevJudge:
 
     # --- Noul --------------------------------------------------------------
 
-    async def check_each(
+    async def noul(
         self,
         state: JSONContent,
         *,
@@ -158,7 +158,7 @@ class JevJudge:
             only: Ask about these labels only (default: all).
 
         Returns:
-            {label: probability of yes}, in label order. Unlike `classify`,
+            {label: probability of yes}, in label order. Unlike `choice`,
             these do not compete: all can be high, or all low.
         """
         names = list(only) if only is not None else list(self.labels)
@@ -176,7 +176,7 @@ class JevJudge:
 
     # --- Score -------------------------------------------------------------
 
-    async def score_each(
+    async def score(
         self,
         state: JSONContent,
         *,
@@ -228,20 +228,20 @@ class JevJudge:
         shortlist: int = 3,
         threshold: float = 0.9,
     ) -> Classification:
-        """`classify`, then keep runners-up that also apply on their own.
+        """`choice`, then keep runners-up that also apply on their own.
 
         The top label is always kept (unless it is `NONE`: then nothing is).
-        Places 2..`shortlist` go through `check_each` with `verify`, and those
+        Places 2..`shortlist` go through `noul` with `verify`, and those
         at or above `threshold` join it. Two requests.
         """
-        first = await self.classify(state, question=question, none=none)
+        first = await self.choice(state, question=question, none=none)
         if first.top is None:
             return first
         runners_up = [n for n in first.probabilities if n not in (NONE, first.top)]
         runners_up = runners_up[: shortlist - 1]
         if not runners_up:
             return first
-        checks = await self.check_each(
+        checks = await self.noul(
             state, question=verify, criteria=verify_criteria, only=runners_up
         )
         extra = [name for name in runners_up if checks[name] >= threshold]
