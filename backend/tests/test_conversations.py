@@ -281,3 +281,138 @@ def test_if_no_new_sandbox_starts_the_conversation_is_closed_and_its_slot_freed(
         assert (await m.get_or_create("y")).sandbox is not None
 
     run(scenario())
+
+
+# --- the warm pool -----------------------------------------------------------------
+
+
+async def warmed(m: ConversationManager) -> None:
+    """Wait for warm sandboxes being started to be ready."""
+    await asyncio.wait_for(asyncio.gather(*list(m._warming)), 2)
+
+
+def test_startup_fills_the_pool():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, warm_sandboxes=2)
+        m.start()
+        await warmed(m)
+        assert len(provider.created) == 2 and m.live_sandboxes() == []
+
+    run(scenario())
+
+
+def test_no_pool_by_default():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider)
+        m.start()
+        await asyncio.sleep(0.05)
+        assert provider.created == []
+
+    run(scenario())
+
+
+def test_a_new_conversation_takes_a_warm_sandbox_and_the_pool_refills():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        files_for = []
+
+        async def copy_files(sandbox):
+            files_for.append(sandbox.id)
+
+        m = manager(provider, warm_sandboxes=1, on_sandbox_ready=copy_files)
+        m.start()
+        await warmed(m)
+        provider.gate.clear()  # from now on, starting a sandbox hangs
+
+        conversation = await asyncio.wait_for(m.get_or_create("x"), 1)  # no wait: it was warm
+        assert conversation.sandbox.id == "sandbox-0"
+        assert files_for == ["sandbox-0"]  # files are copied at hand-out, not before
+        await provider.wait_entered(2)  # the refill started the next one
+        provider.release()
+        await warmed(m)
+        assert len(provider.created) == 2
+
+    run(scenario())
+
+
+def test_warm_sandboxes_count_toward_the_cap():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, warm_sandboxes=1, max_sandboxes=1, wait_seconds=0.05)
+        m.start()
+        await warmed(m)
+        await m.get_or_create("a")  # takes the warm one; no slot left to refill
+        await asyncio.sleep(0.05)
+        assert len(provider.created) == 1
+        with pytest.raises(SandboxesBusy):
+            await m.get_or_create("b")
+
+    run(scenario())
+
+
+def test_a_waiting_conversation_gets_the_freed_slot_before_the_pool():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, warm_sandboxes=1, max_sandboxes=1, wait_seconds=5)
+        m.start()
+        await warmed(m)
+        await m.get_or_create("a")
+        waiting = asyncio.create_task(m.get_or_create("b"))
+        await asyncio.sleep(0.05)
+        await m.close("a")
+        b = await asyncio.wait_for(waiting, 1)
+        assert b.sandbox.id == "sandbox-1" and len(provider.created) == 2  # no third, warm one
+
+    run(scenario())
+
+
+def test_a_warm_sandbox_that_died_is_dropped_for_a_new_one():
+    async def scenario():
+        clock, provider = Clock(), GatedProvider(open=True)
+        m = manager(provider, clock=clock, warm_sandboxes=1, check_after_seconds=60)
+        m.start()
+        await warmed(m)
+        dead = provider.created[0]
+        clock.now, provider.alive = 600, False  # it sat in the pool, then stopped
+
+        conversation = await m.get_or_create("x")
+        assert dead in provider.destroyed and conversation.sandbox is not dead
+
+    run(scenario())
+
+
+def test_a_pool_that_fails_to_fill_is_retried_by_the_reaper():
+    async def scenario():
+        provider = GatedProvider(open=True, fail=True)
+        m = manager(provider, warm_sandboxes=1)
+        m.start()
+        await warmed(m)
+        assert provider.created == [] and m._in_use == 0  # the slot came back
+
+        provider.fail = False
+        await m.reap_idle()
+        await warmed(m)
+        assert len(provider.created) == 1
+
+    run(scenario())
+
+
+def test_shutdown_deletes_warm_sandboxes_too():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, warm_sandboxes=2)
+        m.start()
+        await warmed(m)
+        await m.get_or_create("x")
+        await m.close_all()
+        assert sorted(s.id for s in provider.destroyed) == sorted(s.id for s in provider.created)
+        assert len(provider.created) == 3  # two warm, one refill after the hand-out
+
+    run(scenario())
+
+
+def test_more_warm_than_allowed_is_refused():
+    with pytest.raises(ValueError):
+        manager(GatedProvider(), warm_sandboxes=3, max_sandboxes=2)

@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class ServerConfig(BaseModel):
@@ -27,6 +27,16 @@ class ServerConfig(BaseModel):
 
     sandbox_wait_seconds: float = Field(default=30, ge=0)
     """How long a new conversation waits for a free sandbox before it is refused."""
+
+    warm_sandboxes: int = Field(default=0, ge=0)
+    """Sandboxes kept started and prepared ahead of time, so a new conversation
+    skips the ~12s start. They count toward max_sandboxes and are billed."""
+
+    @model_validator(mode="after")
+    def _warm_fits(self) -> "ServerConfig":
+        if self.max_sandboxes is not None and self.warm_sandboxes > self.max_sandboxes:
+            raise ValueError("warm_sandboxes cannot be more than max_sandboxes")
+        return self
 
     max_upload_mb: float
     """Uploads larger than this are refused."""

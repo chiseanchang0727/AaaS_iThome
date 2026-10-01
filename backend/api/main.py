@@ -32,6 +32,7 @@ manager = ConversationManager(
     on_sandbox_ready=upload_files_hook(store, cfg.sandbox.data_dir),
     max_sandboxes=cfg.server.max_sandboxes,
     wait_seconds=cfg.server.sandbox_wait_seconds,
+    warm_sandboxes=cfg.server.warm_sandboxes,
 )
 
 app = create_app(

@@ -66,4 +66,7 @@ server:
   # conversation waits this long for one to be freed, then is refused.
   max_sandboxes: 10
   sandbox_wait_seconds: 30
+  # Kept started and ready, so a new conversation skips the ~12s start. They
+  # count toward max_sandboxes and are billed while they wait. 0: off.
+  warm_sandboxes: 1
   max_upload_mb: 50

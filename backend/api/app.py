@@ -64,6 +64,7 @@ def create_app(
                 await asyncio.sleep(reap_every_seconds)
                 await manager.reap_idle()
 
+        manager.start()  # begin filling the warm sandbox pool
         reaper = asyncio.create_task(reap_forever())
         try:
             yield

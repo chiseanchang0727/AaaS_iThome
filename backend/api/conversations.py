@@ -12,6 +12,12 @@ At most `max_sandboxes` exist at once. A new conversation waits up to
 A sandbox can die on its own (the provider stops it, a crash). Before a turn,
 one unused for `check_after_seconds` is checked, and replaced if it does not
 answer: same slot, same memory, new empty sandbox.
+
+Starting a sandbox takes ~12s (create, then pip install). `warm_sandboxes`
+keeps that many started and prepared ahead of time; a new conversation takes
+one and only waits for its uploaded files to be copied in. Warm sandboxes hold
+slots like any other, and the pool refills only from slots nobody is waiting
+for.
 """
 
 import asyncio
@@ -65,16 +71,29 @@ class ConversationManager:
         max_sandboxes: int | None = None,
         wait_seconds: float = 30.0,
         check_after_seconds: float = 60.0,
+        warm_sandboxes: int = 0,
     ) -> None:
+        if max_sandboxes is not None and warm_sandboxes > max_sandboxes:
+            raise ValueError("warm_sandboxes cannot be more than max_sandboxes")
         self._build_agent = build_agent
         self._provider = provider
         self._idle_seconds = idle_seconds
         self._on_sandbox_ready = on_sandbox_ready
         self._clock = clock
         self._max_sandboxes = max_sandboxes
-        self._slots = asyncio.Semaphore(max_sandboxes) if max_sandboxes else None
+        self._in_use = 0
+        """Slots taken: sandboxes that exist or are starting, warm ones included."""
+        self._waiting = 0
+        """New conversations waiting for a slot or a warm sandbox."""
+        self._changed = asyncio.Event()
+        """Set when a slot frees up or a warm sandbox is ready."""
         self._wait_seconds = wait_seconds
         self._check_after_seconds = check_after_seconds
+        self._warm_target = warm_sandboxes if provider is not None else 0
+        self._warm: list[tuple[SandboxBackendProtocol, float]] = []
+        """Ready sandboxes, oldest first, with when each became ready."""
+        self._warming: set[asyncio.Task[None]] = set()
+        self._closing = False
         self._conversations: dict[str, Conversation] = {}
         self._starting: dict[str, asyncio.Task[Conversation]] = {}
         """Conversations whose sandbox is being started, so a second request
@@ -89,7 +108,12 @@ class ConversationManager:
         return self._conversations.get(conversation_id)
 
     def live_sandboxes(self) -> list[SandboxBackendProtocol]:
+        """Sandboxes in use by conversations (not warm ones: they get files when handed out)."""
         return [c.sandbox for c in self._conversations.values() if c.sandbox is not None]
+
+    def start(self) -> None:
+        """Begin filling the warm pool. Call once the event loop runs (app startup)."""
+        self._refill()
 
     async def get_or_create(self, conversation_id: str) -> Conversation:
         """The live conversation with this id, or a new one (sandbox included).
@@ -112,12 +136,18 @@ class ConversationManager:
         return conversation
 
     async def _create(self, conversation_id: str) -> Conversation:
-        await self._take_slot()
+        warm = await self._obtain()
         try:
-            sandbox = await self._start_sandbox()
+            if warm is None:
+                sandbox = await self._start_sandbox()
+            else:
+                sandbox = warm
+                await self._ready_for_conversation(sandbox)
         except BaseException:
             self._free_slot()
             raise
+        finally:
+            self._refill()
         agent = self._build_agent(sandbox, self.checkpointer)
         now = self._clock()
         conversation = Conversation(conversation_id, agent, sandbox, now, sandbox_ok_at=now)
@@ -189,26 +219,118 @@ class ConversationManager:
         ]
         for conversation_id in idle:
             await self.close(conversation_id)
+        self._refill()  # also retries a pool that failed to fill earlier
         return idle
 
     async def close_all(self) -> None:
+        self._closing = True
         # Let sandboxes still starting finish first, so they are deleted too.
-        await asyncio.gather(*self._starting.values(), return_exceptions=True)
+        await asyncio.gather(*self._starting.values(), *self._warming, return_exceptions=True)
         for conversation_id in list(self._conversations):
             await self.close(conversation_id)
+        while self._warm:
+            sandbox, _ = self._warm.pop()
+            await self._destroy(sandbox)
+            self._free_slot()
 
     async def _start_sandbox(self) -> SandboxBackendProtocol | None:
+        """A new sandbox, prepared and with this conversation's files."""
+        sandbox = await self._start_prepared()
+        if sandbox is not None:
+            await self._ready_for_conversation(sandbox)
+        return sandbox
+
+    async def _start_prepared(self) -> SandboxBackendProtocol | None:
+        """A new sandbox with its packages installed: the slow part (~12s)."""
         if self._provider is None:
             return None
         sandbox = await asyncio.to_thread(self._provider.create)
         try:
             await asyncio.to_thread(self._provider.prepare, sandbox)
-            if self._on_sandbox_ready is not None:
-                await self._on_sandbox_ready(sandbox)
         except BaseException:
-            await asyncio.to_thread(self._provider.destroy, sandbox)
+            await self._destroy(sandbox)
             raise
         return sandbox
+
+    async def _ready_for_conversation(self, sandbox: SandboxBackendProtocol) -> None:
+        """Copy the uploaded files in. Done at hand-out, so a warm sandbox gets
+        files uploaded after it was started."""
+        if self._on_sandbox_ready is None:
+            return
+        try:
+            await self._on_sandbox_ready(sandbox)
+        except BaseException:
+            await self._destroy(sandbox)
+            raise
+
+    # --- slots and the warm pool ------------------------------------------------
+
+    async def _obtain(self) -> SandboxBackendProtocol | None:
+        """A warm sandbox, or None after taking a slot to start one in.
+
+        Waits up to `wait_seconds` for either, then raises `SandboxesBusy`.
+        """
+        if self._provider is None:
+            return None
+        deadline = asyncio.get_running_loop().time() + self._wait_seconds
+        self._waiting += 1
+        try:
+            while True:
+                warm = await self._take_warm()
+                if warm is not None:
+                    return warm
+                if self._try_take_slot():
+                    return None
+                remaining = deadline - asyncio.get_running_loop().time()
+                self._changed.clear()
+                try:
+                    await asyncio.wait_for(self._changed.wait(), max(remaining, 0))
+                except TimeoutError:
+                    raise SandboxesBusy(
+                        f"all {self._max_sandboxes} sandboxes are in use; try again in a minute"
+                    ) from None
+        finally:
+            self._waiting -= 1
+
+    async def _take_warm(self) -> SandboxBackendProtocol | None:
+        """The oldest warm sandbox that still answers; dead ones are dropped."""
+        while self._warm:
+            sandbox, ready_at = self._warm.pop(0)
+            if self._clock() - ready_at < self._check_after_seconds or await self._alive(sandbox):
+                return sandbox
+            logger.warning("a warm sandbox stopped answering; dropping it")
+            await self._destroy(sandbox)
+            self._free_slot()
+        return None
+
+    def _refill(self) -> None:
+        """Start warm sandboxes until the pool (ready plus starting) is full.
+
+        Only from free slots, and never while a new conversation waits: it
+        should get the slot (or the next warm sandbox) first.
+        """
+        if self._closing:
+            return
+        while len(self._warm) + len(self._warming) < self._warm_target and self._waiting == 0:
+            if not self._try_take_slot():
+                return
+            task = asyncio.create_task(self._warm_one())
+            self._warming.add(task)
+            task.add_done_callback(self._warming.discard)
+
+    async def _warm_one(self) -> None:
+        try:
+            sandbox = await self._start_prepared()
+        except Exception:
+            logger.warning("could not start a warm sandbox; will retry later", exc_info=True)
+            self._free_slot(refill=False)  # retried by the reaper, not in a tight loop
+            return
+        if self._closing:
+            await self._destroy(sandbox)
+            self._free_slot()
+            return
+        self._warm.append((sandbox, self._clock()))
+        self._changed.set()
 
     async def _stop_sandbox(self, conversation: Conversation) -> None:
         if conversation.sandbox is None or self._provider is None:
@@ -225,16 +347,16 @@ class ConversationManager:
         except Exception:
             logger.exception("could not delete sandbox %s", getattr(sandbox, "id", sandbox))
 
-    async def _take_slot(self) -> None:
-        if self._slots is None or self._provider is None:
-            return
-        try:
-            await asyncio.wait_for(self._slots.acquire(), self._wait_seconds)
-        except TimeoutError:
-            raise SandboxesBusy(
-                f"all {self._max_sandboxes} sandboxes are in use; try again in a minute"
-            ) from None
+    def _try_take_slot(self) -> bool:
+        if self._max_sandboxes is not None and self._in_use >= self._max_sandboxes:
+            return False
+        self._in_use += 1
+        return True
 
-    def _free_slot(self) -> None:
-        if self._slots is not None and self._provider is not None:
-            self._slots.release()
+    def _free_slot(self, refill: bool = True) -> None:
+        if self._provider is None:
+            return
+        self._in_use -= 1
+        self._changed.set()
+        if refill:
+            self._refill()
