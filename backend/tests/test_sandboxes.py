@@ -227,6 +227,10 @@ class FakeDaytona:
     def delete(self, sandbox):
         self.deleted.append(sandbox)
 
+    def list(self, query=None):
+        self.queries = [*getattr(self, "queries", []), query]
+        return iter(getattr(self, "existing", []))
+
 
 @pytest.fixture
 def fake_daytona(monkeypatch):
@@ -316,3 +320,45 @@ def test_daytona_session_deletes_on_error(fake_daytona):
 def test_daytona_options_reject_unknown_keys():
     with pytest.raises(ValidationError):
         DaytonaOptions(image="python:3.12")
+
+
+
+# --- labels ------------------------------------------------------------------
+
+
+def test_get_provider_adds_labels_to_the_configured_ones():
+    config = sandbox_config("daytona")
+    config.labels = {"app": "aaas-ithome", "env": "dev"}
+    provider = get_provider(config, labels={"role": "api", "server": "s1"})
+    assert provider.labels == {"app": "aaas-ithome", "env": "dev", "role": "api", "server": "s1"}
+
+
+def test_daytona_puts_the_labels_on_every_sandbox(fake_daytona):
+    DaytonaProvider(labels={"app": "aaas-ithome", "server": "s1"}).create()
+    [params] = fake_daytona.instances[0].created
+    assert params.labels == {"app": "aaas-ithome", "server": "s1"}
+
+
+def test_daytona_without_labels_sends_none(fake_daytona):
+    DaytonaProvider().create()
+    [params] = fake_daytona.instances[0].created
+    assert not params.labels
+
+
+class FakeListed:
+    def __init__(self, id, labels, state="started"):
+        self.id, self.labels, self.state = id, labels, state
+
+
+def test_daytona_finds_sandboxes_by_label_and_deletes_them(fake_daytona):
+    provider = DaytonaProvider()
+    provider._get_client().existing = [FakeListed("old-1", {"app": "a", "server": "s0"})]
+    [found] = provider.find({"app": "a"})
+    assert (found.id, found.labels, found.state) == ("old-1", {"app": "a", "server": "s0"}, "started")
+    assert fake_daytona.instances[0].queries[0].labels == {"app": "a"}
+    provider.delete_found(found)
+    assert [s.id for s in fake_daytona.instances[0].deleted] == ["old-1"]
+
+
+def test_a_provider_that_cannot_list_finds_nothing(tmp_path):
+    assert LocalProvider(root=tmp_path).find({"app": "a"}) == []

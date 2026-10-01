@@ -4,9 +4,11 @@ Reads $DAYTONA_API_KEY. Nothing from this process's environment is passed into
 the sandbox, so the database credentials never reach code the model writes.
 """
 
+from collections.abc import Mapping
+
 from deepagents.backends.protocol import SandboxBackendProtocol
 
-from .base import ProviderOptions, SandboxProvider
+from .base import FoundSandbox, ProviderOptions, SandboxProvider
 
 
 class DaytonaOptions(ProviderOptions):
@@ -29,8 +31,8 @@ class DaytonaProvider(SandboxProvider):
     Options = DaytonaOptions
     options: DaytonaOptions
 
-    def __init__(self, options=None, packages=()) -> None:
-        super().__init__(options, packages)
+    def __init__(self, options=None, packages=(), labels=None) -> None:
+        super().__init__(options, packages, labels)
         self._client = None
         self._sandboxes = {}
 
@@ -47,7 +49,8 @@ class DaytonaProvider(SandboxProvider):
         from langchain_daytona import DaytonaSandbox
 
         params = CreateSandboxFromSnapshotParams(
-            **self.options.model_dump(exclude={"command_timeout"}, exclude_none=True)
+            **self.options.model_dump(exclude={"command_timeout"}, exclude_none=True),
+            **({"labels": self.labels} if self.labels else {}),
         )
         sandbox = self._get_client().create(params)
         backend = DaytonaSandbox(sandbox=sandbox, timeout=self.options.command_timeout)
@@ -58,3 +61,14 @@ class DaytonaProvider(SandboxProvider):
         raw = self._sandboxes.pop(sandbox.id, None)
         if raw is not None:
             self._get_client().delete(raw)
+
+    def find(self, labels: Mapping[str, str]) -> list[FoundSandbox]:
+        from daytona import ListSandboxesQuery
+
+        return [
+            FoundSandbox(id=raw.id, labels=dict(raw.labels or {}), state=str(raw.state), handle=raw)
+            for raw in self._get_client().list(ListSandboxesQuery(labels=dict(labels)))
+        ]
+
+    def delete_found(self, found: FoundSandbox) -> None:
+        self._get_client().delete(found.handle)

@@ -54,6 +54,13 @@ sandbox:
 
   export_max_rows: 100000
 
+  # Put on every sandbox. At startup the API deletes sandboxes with these
+  # labels that an earlier run of it left behind (a crash). Give each
+  # deployment its own env, or they will delete each other's sandboxes.
+  labels:
+    app: aaas-ithome
+    env: dev
+
 server:
   # Relative to backend/. reports/, uploads/ and conversations/ are git-ignored.
   artifacts_dir: reports/artifacts

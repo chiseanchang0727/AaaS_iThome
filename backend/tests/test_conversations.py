@@ -12,7 +12,7 @@ import threading
 import pytest
 
 from api import ConversationManager, SandboxesBusy
-from sandboxes import SandboxProvider
+from sandboxes import FoundSandbox, SandboxProvider
 
 
 class Sandbox:
@@ -505,3 +505,85 @@ def test_status_counts_the_warm_pool():
 def test_status_without_sandboxes():
     s = ConversationManager(lambda sandbox, checkpointer: {}, None, idle_seconds=60).status()
     assert s["enabled"] is False and s["in_use"] == 0 and s["provider"] is None
+
+
+
+# --- cleaning up after a crashed run -------------------------------------------------
+
+
+class ListingProvider(GatedProvider):
+    """A provider whose account already has some labeled sandboxes."""
+
+    def __init__(self, existing, labels, fail_find=False, fail_delete=()):
+        super().__init__(open=True)
+        self.labels = labels
+        self.existing, self.fail_find, self.fail_delete = existing, fail_find, set(fail_delete)
+        self.queries, self.deleted_found = [], []
+
+    def find(self, labels):
+        self.queries.append(labels)
+        if self.fail_find:
+            raise RuntimeError("API down")
+        return [f for f in self.existing if all(f.labels.get(k) == v for k, v in labels.items())]
+
+    def delete_found(self, found):
+        if found.id in self.fail_delete:
+            raise RuntimeError("not allowed")
+        self.deleted_found.append(found.id)
+
+
+LABELS = {"app": "aaas-ithome", "env": "dev", "role": "api", "server": "now"}
+
+
+def found(id, **labels):
+    return FoundSandbox(id=id, labels={**LABELS, **labels})
+
+
+def test_startup_deletes_what_an_earlier_run_left_behind():
+    async def scenario():
+        provider = ListingProvider(
+            [found("crashed-1", server="before"), found("crashed-2", server="before"),
+             found("mine", server="now"), found("other-env", env="prod", server="x"),
+             FoundSandbox(id="an-eval", labels={"app": "aaas-ithome", "env": "dev"})],
+            LABELS,
+        )
+        m = manager(provider)
+        m.start()
+        assert await asyncio.wait_for(m._cleanup, 1) == ["crashed-1", "crashed-2"]
+        assert provider.queries == [{"app": "aaas-ithome", "env": "dev", "role": "api"}]
+        assert provider.deleted_found == ["crashed-1", "crashed-2"]
+
+    run(scenario())
+
+
+def test_no_server_label_means_no_cleanup():
+    async def scenario():
+        provider = ListingProvider([found("x", server="before")], {"app": "aaas-ithome"})
+        m = manager(provider)
+        m.start()
+        assert m._cleanup is None and provider.queries == []
+        assert await m.clean_up_leftovers() == []
+
+    run(scenario())
+
+
+def test_cleanup_failures_never_stop_the_server():
+    async def scenario():
+        down = ListingProvider([], LABELS, fail_find=True)
+        assert await manager(down).clean_up_leftovers() == []
+
+        stuck = ListingProvider([found("a", server="old"), found("b", server="old")], LABELS, fail_delete=["a"])
+        assert await manager(stuck).clean_up_leftovers() == ["b"]  # one failure, the rest still go
+
+    run(scenario())
+
+
+def test_shutdown_waits_for_the_cleanup():
+    async def scenario():
+        provider = ListingProvider([found("crashed", server="before")], LABELS)
+        m = manager(provider)
+        m.start()
+        await m.close_all()
+        assert provider.deleted_found == ["crashed"]
+
+    run(scenario())

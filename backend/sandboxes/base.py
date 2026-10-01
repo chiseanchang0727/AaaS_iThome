@@ -7,8 +7,9 @@ commands and moving files work the same whichever provider made it.
 
 import shlex
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
@@ -18,6 +19,17 @@ from pydantic import BaseModel, ConfigDict
 
 class SandboxSetupError(RuntimeError):
     """A new sandbox could not be prepared, e.g. a package failed to install."""
+
+
+@dataclass(frozen=True)
+class FoundSandbox:
+    """A sandbox that exists at the provider, found by its labels."""
+
+    id: str
+    labels: dict[str, str] = field(default_factory=dict)
+    state: str = ""
+    handle: Any = None
+    """The provider's own object for it, for `delete_found`."""
 
 
 class ProviderOptions(BaseModel):
@@ -39,9 +51,16 @@ class SandboxProvider(ABC):
     Options: ClassVar[type[ProviderOptions]] = ProviderOptions
     """Schema for `sandbox.options`; unknown keys are rejected."""
 
-    def __init__(self, options: dict[str, Any] | None = None, packages: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        options: dict[str, Any] | None = None,
+        packages: Iterable[str] = (),
+        labels: Mapping[str, str] | None = None,
+    ) -> None:
         self.options = self.Options.model_validate(options or {})
         self.packages = list(packages)
+        self.labels = dict(labels or {})
+        """Put on every sandbox `create` makes, if the provider supports labels."""
 
     @abstractmethod
     def create(self) -> SandboxBackendProtocol:
@@ -50,6 +69,17 @@ class SandboxProvider(ABC):
     @abstractmethod
     def destroy(self, sandbox: SandboxBackendProtocol) -> None:
         """Tear down a sandbox from `create`. Must not raise if already gone."""
+
+    def find(self, labels: Mapping[str, str]) -> list[FoundSandbox]:
+        """Every sandbox at the provider carrying all of `labels`, ours or not.
+
+        Providers that cannot list return []: nothing is found, nothing deleted.
+        """
+        return []
+
+    def delete_found(self, found: FoundSandbox) -> None:
+        """Delete a sandbox from `find`."""
+        raise NotImplementedError
 
     def is_alive(self, sandbox: SandboxBackendProtocol) -> bool:
         """Does the sandbox still run commands? A cheap round trip.

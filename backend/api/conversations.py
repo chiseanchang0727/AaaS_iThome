@@ -18,6 +18,10 @@ A sandbox can die on its own (the provider stops it, a crash). Before a turn,
 one unused for `check_after_seconds` is checked, and replaced if it does not
 answer: same slot, same memory, new empty sandbox.
 
+If the provider's sandboxes carry a `server` label (api/main.py gives each
+run its own), `start` also deletes sandboxes an earlier run left behind (it
+crashed before deleting them): same labels, another `server`.
+
 Starting a sandbox takes ~12s (create, then pip install). `warm_sandboxes`
 keeps that many started and prepared ahead of time; a new conversation takes
 one and only waits for its uploaded files to be copied in. Warm sandboxes hold
@@ -103,6 +107,7 @@ class ConversationManager:
         """Ready sandboxes, oldest first, with when each became ready."""
         self._warming: set[asyncio.Task[None]] = set()
         self._closing = False
+        self._cleanup: asyncio.Task[list[str]] | None = None
         self._conversations: dict[str, Conversation] = {}
         self._starts: set[asyncio.Task[None]] = set()
         self.checkpointer = InMemorySaver()
@@ -147,8 +152,41 @@ class ConversationManager:
         }
 
     def start(self) -> None:
-        """Begin filling the warm pool. Call once the event loop runs (app startup)."""
+        """Delete what a crashed run left behind, and begin filling the warm pool.
+
+        Call once the event loop runs (app startup). Both run in the background.
+        """
+        if self._provider is not None and self._provider.labels.get("server"):
+            self._cleanup = asyncio.create_task(self.clean_up_leftovers())
         self._refill()
+
+    async def clean_up_leftovers(self) -> list[str]:
+        """Delete sandboxes with this run's labels but another run's `server`. Their ids.
+
+        Another run that is still alive with the same labels would lose its
+        sandboxes too: each deployment needs its own labels (e.g. env).
+        """
+        own = self._provider.labels.get("server")
+        if not own:
+            return []
+        query = {k: v for k, v in self._provider.labels.items() if k != "server"}
+        try:
+            found = await asyncio.to_thread(self._provider.find, query)
+        except Exception:
+            logger.warning("could not list sandboxes to clean up", exc_info=True)
+            return []
+        deleted = []
+        for leftover in found:
+            if leftover.labels.get("server") == own:
+                continue
+            try:
+                await asyncio.to_thread(self._provider.delete_found, leftover)
+                deleted.append(leftover.id)
+            except Exception:
+                logger.warning("could not delete leftover sandbox %s", leftover.id, exc_info=True)
+        if deleted:
+            logger.warning("deleted %d sandbox(es) an earlier run left behind: %s", len(deleted), deleted)
+        return deleted
 
     async def get_or_create(self, conversation_id: str) -> Conversation:
         """The live conversation with this id, or a new one. Never waits for a sandbox.
@@ -283,6 +321,8 @@ class ConversationManager:
 
     async def close_all(self) -> None:
         self._closing = True
+        if self._cleanup is not None:
+            await asyncio.gather(self._cleanup, return_exceptions=True)
         # Let sandboxes still starting finish first, so they are deleted too.
         await asyncio.gather(*self._starts, *self._warming, return_exceptions=True)
         for conversation_id in list(self._conversations):

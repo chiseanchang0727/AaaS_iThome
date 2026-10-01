@@ -3,6 +3,7 @@
     uv run --env-file ../.env uvicorn api.main:app --reload     # from backend/
 """
 
+import uuid
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -27,7 +28,9 @@ store = DatasetStore(
 
 manager = ConversationManager(
     build_agent=lambda sandbox, checkpointer: build_agent(sandbox=sandbox, checkpointer=checkpointer),
-    provider=get_provider(cfg.sandbox),
+    # role and server mark this run's sandboxes, so the next run can delete
+    # any it leaves behind (see ConversationManager.clean_up_leftovers).
+    provider=get_provider(cfg.sandbox, labels={"role": "api", "server": uuid.uuid4().hex[:12]}),
     idle_seconds=cfg.server.sandbox_idle_minutes * 60,
     on_sandbox_ready=upload_files_hook(store, cfg.sandbox.data_dir),
     max_sandboxes=cfg.server.max_sandboxes,

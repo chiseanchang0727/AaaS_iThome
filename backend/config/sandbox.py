@@ -30,6 +30,11 @@ class SandboxConfig(BaseModel):
     output_dir: PurePosixPath
     """Where the agent saves charts and reports; downloaded after the run."""
 
+    labels: dict[str, str] = {}
+    """Put on every sandbox, so this app's sandboxes can be told apart from
+    others on the account. The API adds `role` and `server` (see api/main.py)
+    and, at startup, deletes sandboxes a crashed run of it left behind."""
+
     export_max_rows: int
     """Row cap for export_query. Higher than database.max_rows: the rows go to
     a file in the sandbox, not into the model's context."""
