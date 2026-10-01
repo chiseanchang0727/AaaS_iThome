@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
-from api import ConversationManager, create_app
+from api import ConversationManager, HistoryStore, create_app
 from api.events import RESULT_CHARS
 from sandboxes import SandboxProvider
 
@@ -79,7 +79,7 @@ def write_output(name: str, content: bytes):
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, turns=(), provider=None, idle_seconds=900):
+    def __init__(self, tmp_path: Path, turns=(), provider=None, idle_seconds=900, history=None):
         self.now = 0.0
         self.provider = provider if provider is not None else TempDirProvider(tmp_path)
         self.agents: list[ScriptedAgent] = []
@@ -100,7 +100,8 @@ class Harness:
         )
         self.artifacts = tmp_path / "artifacts"
         self.app = create_app(
-            self.manager, self.artifacts, OUTPUT_DIR, reap_every_seconds=3600, on_shutdown=on_shutdown
+            self.manager, self.artifacts, OUTPUT_DIR, reap_every_seconds=3600, on_shutdown=on_shutdown,
+            history=history,
         )
 
 

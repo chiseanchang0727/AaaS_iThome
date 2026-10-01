@@ -19,6 +19,7 @@ dependencies = [
     "pydantic>=2.13.5",
     "python-multipart>=0.0.32",
     "pyyaml>=6.0.3",
+    "typesafe-sdk>=0.7.2",
     "uvicorn[standard]>=0.54.0",
 ]
 
@@ -31,3 +32,6 @@ dev = [
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# Live tests call paid APIs: `pytest -m live` runs them, a plain run skips them.
+addopts = "-m 'not live'"
+markers = ["live: calls a real external API (needs its key)"]

@@ -227,5 +227,8 @@ notes/
 # Files users upload through the API
 uploads/
 
+# Conversation history (one JSONL file per conversation)
+conversations/
+
 # Article drafts, kept locally
 articles/

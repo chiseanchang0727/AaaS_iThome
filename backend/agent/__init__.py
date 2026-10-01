@@ -6,6 +6,8 @@
     result = await agent.ainvoke({"messages": [{"role": "user", "content": "..."}]})
 """
 
+import logging
+import os
 import re
 
 from deepagents import FilesystemPermission, create_deep_agent
@@ -17,9 +19,12 @@ from config import cfg
 from datasets import Registry
 
 from .middleware import SkillEnforcerMiddleware
+from .skill_router import SkillRouterMiddleware, build_classifier
 from .tools import make_export_query, make_list_datasets, query_database
 
 __all__ = ["build_agent", "SYSTEM_PROMPT", "SANDBOX_PROMPT"]
+
+log = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
 You are a data analyst. The data is the built-in `videos` table (US YouTube
@@ -68,6 +73,18 @@ def touches_videos(tool_call: dict) -> bool:
     return bool(_VIDEOS.search(str(tool_call.get("args", {}).get("sql", ""))))
 
 
+def skill_router() -> SkillRouterMiddleware | None:
+    """The router from `cfg.agent.skill_router`, or None when it is off or has no key."""
+    settings = cfg.agent.skill_router
+    if settings is None:
+        return None
+    if not os.environ.get("TYPESAFE_API_KEY"):
+        log.warning("agent.skill_router is set but $TYPESAFE_API_KEY is not; routing is off")
+        return None
+    classifier = build_classifier(cfg.agent.skills_dir, model=settings.model)
+    return SkillRouterMiddleware(classifier, top_n=settings.top_n, multi=settings.multi)
+
+
 def build_agent(
     *,
     require_sql_skill: bool = True,
@@ -102,20 +119,20 @@ def build_agent(
             data_dir=cfg.sandbox.data_dir, output_dir=cfg.sandbox.output_dir
         )
 
+    middleware = []
+    if router := skill_router():
+        middleware.append(router)
     # Appended last: after_model hooks run in reverse order, so this checks
     # the model's calls before any middleware added ahead of it.
-    middleware = (
-        [
+    if require_sql_skill:
+        middleware.append(
             SkillEnforcerMiddleware(
                 cfg.agent.skills_dir,
                 target_skills="query_database",
                 shared_skills={"export_query": "query_database"},
                 applies_to=touches_videos,
             )
-        ]
-        if require_sql_skill
-        else []
-    )
+        )
 
     return create_deep_agent(
         model=cfg.agent.model,
