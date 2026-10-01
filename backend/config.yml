@@ -13,6 +13,17 @@ agent:
     # At most this many skills per user message.
     top_n: 1
     multi: false
+  # Sends only the earlier turns each new message needs; the rest stay in the
+  # history file. Used by evals/memory for now, not yet by the API.
+  context_filter:
+    model: jev-1.13.0
+    # An older turn is sent when Jev says yes with at least this probability.
+    threshold: 0.5
+    # The most recent turns are always sent, without asking Jev.
+    keep_last: 1
+    # Follow references back through earlier turns, at most this many rounds
+    # (one Jev round trip each). 1: only ask about the new message.
+    max_rounds: 3
 
 data:
   # Resolved against the working directory. Format follows from the extension.
