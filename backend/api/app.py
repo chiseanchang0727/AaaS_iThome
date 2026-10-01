@@ -6,7 +6,7 @@
     DELETE /api/conversations/{id}           end a conversation, delete its sandbox
     GET    /api/artifacts/{id}/{path}        a file the agent made
     GET    /api/health
-    ...plus the upload routes in api/datasets.py
+    ...plus the upload routes in api/datasets.py and the eval routes in api/evals.py
 """
 
 import asyncio

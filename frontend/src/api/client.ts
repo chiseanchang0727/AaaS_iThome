@@ -1,5 +1,5 @@
 import { SSEParser } from './sse'
-import type { ChatEvent, Dataset, DatasetKind, StagedUpload } from './types'
+import type { ChatEvent, Dataset, DatasetKind, EvalRun, EvalRunInfo, HistoryLine, StagedUpload } from './types'
 
 /** An error the backend explained; `message` is fit to show the user. */
 export class ApiError extends Error {
@@ -82,4 +82,17 @@ export async function listDatasets(): Promise<Dataset[]> {
 
 export async function deleteDataset(name: string): Promise<void> {
   await json(await fetch(`/api/datasets/${encodeURIComponent(name)}`, { method: 'DELETE' }))
+}
+
+export async function listEvalRuns(): Promise<EvalRunInfo[]> {
+  return json(await fetch('/api/evals/context/runs'))
+}
+
+export async function getEvalRun(id: string): Promise<EvalRun> {
+  return json(await fetch(`/api/evals/context/runs/${encodeURIComponent(id)}`))
+}
+
+export async function getEvalHistory(runId: string, conversation: string, arm: string, repeat = 1): Promise<HistoryLine[]> {
+  const path = [runId, 'history', conversation, arm].map(encodeURIComponent).join('/')
+  return json(await fetch(`/api/evals/context/runs/${path}?repeat=${repeat}`))
 }

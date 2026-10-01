@@ -3,6 +3,7 @@
     uv run --env-file ../.env uvicorn api.main:app --reload     # from backend/
 """
 
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from agent import build_agent
@@ -14,6 +15,7 @@ from sandboxes import get_provider
 from .app import create_app
 from .conversations import ConversationManager
 from .datasets import datasets_router, upload_files_hook
+from .evals import evals_router
 from .history import HistoryStore
 
 store = DatasetStore(
@@ -35,6 +37,9 @@ app = create_app(
     artifacts_dir=cfg.server.artifacts_dir,
     output_dir=cfg.sandbox.output_dir,
     on_shutdown=close_database,
-    routers=[datasets_router(store, cfg.sandbox.data_dir, manager.live_sandboxes)],
+    routers=[
+        datasets_router(store, cfg.sandbox.data_dir, manager.live_sandboxes),
+        evals_router(Path("evals/memory/out/runs")),
+    ],
     history=HistoryStore(cfg.server.history_dir),
 )
