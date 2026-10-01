@@ -1,7 +1,9 @@
 """ConversationManager when sandboxes are slow to start and requests overlap.
 
 Sandbox starts are real threads (asyncio.to_thread), held at a gate the test
-opens, so "one start is still running" is a state the test controls.
+opens, so "one start is still running" is a state the test controls. A new
+conversation is returned at once; its sandbox starts in the background
+(`conversation.starting`), behind the stand-in the agent was built on.
 """
 
 import asyncio
@@ -76,20 +78,64 @@ def run(coro):
     return asyncio.run(coro)
 
 
-def test_a_live_conversation_does_not_wait_for_another_to_start():
+async def started(m: ConversationManager, conversation_id: str):
+    """The conversation, once its background sandbox start has finished."""
+    conversation = await asyncio.wait_for(m.get_or_create(conversation_id), 1)
+    if conversation.starting is not None:
+        await asyncio.wait_for(asyncio.shield(conversation.starting), 2)
+    return conversation
+
+
+def stand_in(conversation):
+    """What the agent was built on (the fake builder keeps it)."""
+    return conversation.agent["sandbox"]
+
+
+# --- starting in the background ------------------------------------------------------
+
+
+def test_a_new_conversation_is_ready_before_its_sandbox():
     async def scenario():
         provider = GatedProvider()
         m = manager(provider)
+        conversation = await asyncio.wait_for(m.get_or_create("x"), 1)  # no wait for the sandbox
+        assert conversation.sandbox is None and not stand_in(conversation).settled
+        await provider.wait_entered()
         provider.release()
-        await m.get_or_create("old")
-        provider.gate.clear()
+        await conversation.starting
+        assert conversation.sandbox.id == "sandbox-0"
+        assert stand_in(conversation).id == "sandbox-0"  # the stand-in now passes through
 
-        starting = asyncio.create_task(m.get_or_create("new"))
-        await provider.wait_entered(2)  # "old", then "new" is now held at the gate
-        old = await asyncio.wait_for(m.get_or_create("old"), timeout=1)
-        assert old.id == "old" and not starting.done()
+    run(scenario())
+
+
+def test_the_stand_in_waits_for_the_sandbox_then_passes_calls_through():
+    async def scenario():
+        provider = GatedProvider()
+        m = manager(provider)
+        conversation = await m.get_or_create("x")
+        reading = asyncio.create_task(asyncio.to_thread(stand_in(conversation).ls, "/"))
+        await provider.wait_entered()
+        await asyncio.sleep(0.05)
+        assert not reading.done()  # waiting for the sandbox
         provider.release()
-        await starting
+        with pytest.raises(AttributeError):  # reached the fake sandbox, which has no ls
+            await asyncio.wait_for(reading, 2)
+
+    run(scenario())
+
+
+def test_a_live_conversation_does_not_wait_for_another_to_start():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider)
+        await started(m, "old")
+        provider.gate.clear()
+        new = await m.get_or_create("new")
+        await provider.wait_entered(2)
+        assert (await asyncio.wait_for(m.get_or_create("old"), 1)).sandbox.id == "sandbox-0"
+        provider.release()
+        await new.starting
 
     run(scenario())
 
@@ -98,56 +144,55 @@ def test_new_conversations_start_side_by_side():
     async def scenario():
         provider = GatedProvider()
         m = manager(provider)
-        a = asyncio.create_task(m.get_or_create("a"))
-        b = asyncio.create_task(m.get_or_create("b"))
+        a, b = await m.get_or_create("a"), await m.get_or_create("b")
         await provider.wait_entered(2)  # both inside create at once
         provider.release()
-        assert {c.sandbox.id for c in await asyncio.gather(a, b)} == {"sandbox-0", "sandbox-1"}
+        await asyncio.gather(a.starting, b.starting)
+        assert {a.sandbox.id, b.sandbox.id} == {"sandbox-0", "sandbox-1"}
 
     run(scenario())
 
 
 def test_two_requests_for_one_new_conversation_share_one_sandbox():
     async def scenario():
-        provider = GatedProvider()
+        provider = GatedProvider(open=True)
         m = manager(provider)
-        first = asyncio.create_task(m.get_or_create("same"))
-        second = asyncio.create_task(m.get_or_create("same"))
-        await provider.wait_entered()
-        provider.release()
-        one, two = await asyncio.gather(first, second)
+        one, two = await asyncio.gather(m.get_or_create("same"), m.get_or_create("same"))
+        await one.starting
         assert one is two and len(provider.created) == 1
 
     run(scenario())
 
 
-def test_a_failed_start_fails_its_waiters_and_can_be_retried():
+def test_a_failed_start_is_reported_by_the_stand_in_and_retried_next_turn():
     async def scenario():
-        provider = GatedProvider(fail=True)
+        provider = GatedProvider(fail=True, open=True)
         m = manager(provider)
-        waiters = [asyncio.create_task(m.get_or_create("x")) for _ in range(2)]
-        provider.release()
-        for w in waiters:
-            with pytest.raises(RuntimeError, match="quota"):
-                await w
-        assert m.get("x") is None
+        conversation = await started(m, "x")
+        assert conversation.sandbox is None
+        result = await asyncio.to_thread(stand_in(conversation).execute, "python plot.py")
+        assert result.exit_code == 1 and "quota exceeded" in result.output
 
         provider.fail = False
-        assert (await m.get_or_create("x")).sandbox.id == "sandbox-0"
+        assert await m.ensure_sandbox(conversation) is False  # not a replacement, a retry
+        await conversation.starting
+        assert conversation.sandbox.id == "sandbox-0"
+        assert stand_in(conversation).id == "sandbox-0"  # a new agent, on a new stand-in
 
     run(scenario())
 
 
-def test_a_waiter_that_leaves_does_not_cancel_the_start():
+def test_a_conversation_closed_while_starting_does_not_keep_its_sandbox():
     async def scenario():
         provider = GatedProvider()
-        m = manager(provider)
-        leaving = asyncio.create_task(m.get_or_create("x"))
-        await provider.wait_entered()
-        leaving.cancel()  # the browser closed the stream
-        provider.release()
+        m = manager(provider, max_sandboxes=1, wait_seconds=0.05)
         conversation = await m.get_or_create("x")
-        assert conversation.sandbox.id == "sandbox-0" and len(provider.created) == 1
+        await provider.wait_entered()
+        await m.close("x")
+        provider.release()
+        await conversation.starting
+        assert provider.destroyed == provider.created and len(provider.created) == 1
+        assert (await started(m, "y")).sandbox is not None  # its slot was freed
 
     run(scenario())
 
@@ -156,7 +201,7 @@ def test_shutdown_also_deletes_a_sandbox_still_starting():
     async def scenario():
         provider = GatedProvider()
         m = manager(provider)
-        asyncio.create_task(m.get_or_create("late"))
+        await m.get_or_create("late")
         await provider.wait_entered()
         closing = asyncio.create_task(m.close_all())
         await asyncio.sleep(0)
@@ -170,29 +215,30 @@ def test_shutdown_also_deletes_a_sandbox_still_starting():
 # --- the cap on sandboxes ----------------------------------------------------------
 
 
-def test_a_full_house_refuses_a_new_conversation_after_the_wait():
+def test_a_full_house_leaves_the_new_conversation_without_a_sandbox():
     async def scenario():
         provider = GatedProvider(open=True)
         m = manager(provider, max_sandboxes=1, wait_seconds=0.05)
-        await m.get_or_create("first")
-        with pytest.raises(SandboxesBusy, match="all 1 sandboxes are in use"):
-            await m.get_or_create("second")
-        assert len(provider.created) == 1 and m.get("second") is None
-        assert (await m.get_or_create("first")).id == "first"  # live ones are unaffected
+        await started(m, "first")
+        second = await started(m, "second")  # answers anyway; only code steps fail
+        assert second.sandbox is None and len(provider.created) == 1
+        result = await asyncio.to_thread(stand_in(second).execute, "ls")
+        assert "all 1 sandboxes are in use" in result.output
 
     run(scenario())
 
 
-def test_a_waiting_conversation_gets_the_slot_a_closed_one_frees():
+def test_a_waiting_start_gets_the_slot_a_closed_conversation_frees():
     async def scenario():
         provider = GatedProvider(open=True)
         m = manager(provider, max_sandboxes=1, wait_seconds=5)
-        await m.get_or_create("first")
-        waiting = asyncio.create_task(m.get_or_create("second"))
+        await started(m, "first")
+        second = await m.get_or_create("second")
         await asyncio.sleep(0.05)
-        assert not waiting.done()
+        assert not second.starting.done()
         await m.close("first")
-        assert (await asyncio.wait_for(waiting, 1)).sandbox.id == "sandbox-1"
+        await asyncio.wait_for(second.starting, 1)
+        assert second.sandbox.id == "sandbox-1"
 
     run(scenario())
 
@@ -201,10 +247,9 @@ def test_a_failed_start_gives_its_slot_back():
     async def scenario():
         provider = GatedProvider(fail=True, open=True)
         m = manager(provider, max_sandboxes=1, wait_seconds=0.05)
-        with pytest.raises(RuntimeError, match="quota"):
-            await m.get_or_create("x")
+        assert (await started(m, "x")).sandbox is None
         provider.fail = False
-        assert (await m.get_or_create("y")).sandbox is not None
+        assert (await started(m, "y")).sandbox is not None
 
     run(scenario())
 
@@ -214,7 +259,7 @@ def test_no_limit_by_default():
         provider = GatedProvider(open=True)
         m = manager(provider)
         for n in range(5):
-            await m.get_or_create(f"c{n}")
+            await started(m, f"c{n}")
         assert len(provider.created) == 5
 
     run(scenario())
@@ -227,7 +272,7 @@ def test_a_recently_used_sandbox_is_not_checked():
     async def scenario():
         clock, provider = Clock(), GatedProvider(open=True)
         m = manager(provider, clock=clock, check_after_seconds=60)
-        conversation = await m.get_or_create("x")
+        conversation = await started(m, "x")
         clock.now = 59
         assert await m.ensure_sandbox(conversation) is False
         assert provider.checks == 0
@@ -239,7 +284,7 @@ def test_an_idle_sandbox_that_answers_is_kept():
     async def scenario():
         clock, provider = Clock(), GatedProvider(open=True)
         m = manager(provider, clock=clock, check_after_seconds=60)
-        conversation = await m.get_or_create("x")
+        conversation = await started(m, "x")
         clock.now = 120
         assert await m.ensure_sandbox(conversation) is False
         assert provider.checks == 1 and conversation.sandbox.id == "sandbox-0"
@@ -253,32 +298,33 @@ def test_a_dead_sandbox_is_replaced_in_the_same_slot():
     async def scenario():
         clock, provider = Clock(), GatedProvider(open=True)
         m = manager(provider, clock=clock, check_after_seconds=60, max_sandboxes=1, wait_seconds=0.05)
-        conversation = await m.get_or_create("x")
+        conversation = await started(m, "x")
         old = conversation.sandbox
         clock.now, provider.alive = 120, False
 
         assert await m.ensure_sandbox(conversation) is True
-        assert provider.destroyed == [old]
+        assert provider.destroyed == [old] and conversation.sandbox is None
+        await conversation.starting
         assert conversation.sandbox.id == "sandbox-1"
-        assert conversation.agent == {"sandbox": conversation.sandbox}  # rebuilt on the new one
-        with pytest.raises(SandboxesBusy):  # still holds its one slot
-            await m.get_or_create("other")
+        assert stand_in(conversation).id == "sandbox-1"  # the agent was rebuilt on it
+        other = await started(m, "other")  # still holds its one slot
+        assert other.sandbox is None
 
     run(scenario())
 
 
-def test_if_no_new_sandbox_starts_the_conversation_is_closed_and_its_slot_freed():
+def test_if_no_replacement_starts_its_slot_is_freed():
     async def scenario():
         clock, provider = Clock(), GatedProvider(open=True)
         m = manager(provider, clock=clock, check_after_seconds=60, max_sandboxes=1, wait_seconds=0.05)
-        conversation = await m.get_or_create("x")
+        conversation = await started(m, "x")
         clock.now, provider.alive, provider.fail = 120, False, True
 
-        with pytest.raises(RuntimeError, match="quota"):
-            await m.ensure_sandbox(conversation)
-        assert m.get("x") is None
+        assert await m.ensure_sandbox(conversation) is True
+        await conversation.starting
+        assert conversation.sandbox is None
         provider.fail = False
-        assert (await m.get_or_create("y")).sandbox is not None
+        assert (await started(m, "y")).sandbox is not None
 
     run(scenario())
 
@@ -326,7 +372,7 @@ def test_a_new_conversation_takes_a_warm_sandbox_and_the_pool_refills():
         await warmed(m)
         provider.gate.clear()  # from now on, starting a sandbox hangs
 
-        conversation = await asyncio.wait_for(m.get_or_create("x"), 1)  # no wait: it was warm
+        conversation = await started(m, "x")  # done at once: it was warm
         assert conversation.sandbox.id == "sandbox-0"
         assert files_for == ["sandbox-0"]  # files are copied at hand-out, not before
         await provider.wait_entered(2)  # the refill started the next one
@@ -343,26 +389,25 @@ def test_warm_sandboxes_count_toward_the_cap():
         m = manager(provider, warm_sandboxes=1, max_sandboxes=1, wait_seconds=0.05)
         m.start()
         await warmed(m)
-        await m.get_or_create("a")  # takes the warm one; no slot left to refill
+        await started(m, "a")  # takes the warm one; no slot left to refill
         await asyncio.sleep(0.05)
         assert len(provider.created) == 1
-        with pytest.raises(SandboxesBusy):
-            await m.get_or_create("b")
+        assert (await started(m, "b")).sandbox is None
 
     run(scenario())
 
 
-def test_a_waiting_conversation_gets_the_freed_slot_before_the_pool():
+def test_a_waiting_start_gets_the_freed_slot_before_the_pool():
     async def scenario():
         provider = GatedProvider(open=True)
         m = manager(provider, warm_sandboxes=1, max_sandboxes=1, wait_seconds=5)
         m.start()
         await warmed(m)
-        await m.get_or_create("a")
-        waiting = asyncio.create_task(m.get_or_create("b"))
+        await started(m, "a")
+        b = await m.get_or_create("b")
         await asyncio.sleep(0.05)
         await m.close("a")
-        b = await asyncio.wait_for(waiting, 1)
+        await asyncio.wait_for(b.starting, 1)
         assert b.sandbox.id == "sandbox-1" and len(provider.created) == 2  # no third, warm one
 
     run(scenario())
@@ -377,7 +422,7 @@ def test_a_warm_sandbox_that_died_is_dropped_for_a_new_one():
         dead = provider.created[0]
         clock.now, provider.alive = 600, False  # it sat in the pool, then stopped
 
-        conversation = await m.get_or_create("x")
+        conversation = await started(m, "x")
         assert dead in provider.destroyed and conversation.sandbox is not dead
 
     run(scenario())
@@ -405,7 +450,7 @@ def test_shutdown_deletes_warm_sandboxes_too():
         m = manager(provider, warm_sandboxes=2)
         m.start()
         await warmed(m)
-        await m.get_or_create("x")
+        await started(m, "x")
         await m.close_all()
         assert sorted(s.id for s in provider.destroyed) == sorted(s.id for s in provider.created)
         assert len(provider.created) == 3  # two warm, one refill after the hand-out

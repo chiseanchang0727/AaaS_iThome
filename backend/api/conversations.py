@@ -1,13 +1,18 @@
 """Conversations: an agent, a sandbox and a memory per thread, reused across turns.
 
-A conversation's sandbox is created on its first message and kept for its
+A conversation's sandbox is started on its first message and kept for its
 follow-ups, so exported files and loaded data survive between turns. It is
 deleted after `idle_seconds` without a message: sandboxes are billed while
 they exist. The conversation's memory (the checkpointer) outlives the sandbox;
 a later message gets a fresh sandbox, and files from the old one are gone.
 
-At most `max_sandboxes` exist at once. A new conversation waits up to
-`wait_seconds` for one to be deleted, then is refused (`SandboxesBusy`).
+The sandbox starts in the background: the agent is built on a stand-in
+(sandboxes.LazySandbox) and starts answering at once. SQL never touches the
+sandbox; the first code or file step waits for it. If it never comes, those
+steps get an error result saying so, and the next message tries again.
+
+At most `max_sandboxes` exist at once. A start waits up to `wait_seconds` for
+one to be deleted, then gives up (`SandboxesBusy`).
 
 A sandbox can die on its own (the provider stops it, a crash). Before a turn,
 one unused for `check_after_seconds` is checked, and replaced if it does not
@@ -33,6 +38,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
 from sandboxes import SandboxProvider
+from sandboxes.lazy import LazySandbox
 
 logger = logging.getLogger(__name__)
 
@@ -52,10 +58,13 @@ class Conversation:
     id: str
     agent: Any
     sandbox: SandboxBackendProtocol | None
+    """The real sandbox once started; the agent holds a stand-in until then."""
     last_used: float
     sandbox_ok_at: float = 0.0
     """When the sandbox last worked: started, passed a check, or ran a turn."""
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    starting: asyncio.Task[None] | None = None
+    """The sandbox start running in the background, if any."""
     announced: set[str] = field(default_factory=set)
     """Artifact paths already sent to the client, so each is sent once."""
 
@@ -95,9 +104,7 @@ class ConversationManager:
         self._warming: set[asyncio.Task[None]] = set()
         self._closing = False
         self._conversations: dict[str, Conversation] = {}
-        self._starting: dict[str, asyncio.Task[Conversation]] = {}
-        """Conversations whose sandbox is being started, so a second request
-        for the same new id waits for that start instead of making another."""
+        self._starts: set[asyncio.Task[None]] = set()
         self.checkpointer = InMemorySaver()
 
     @staticmethod
@@ -116,43 +123,72 @@ class ConversationManager:
         self._refill()
 
     async def get_or_create(self, conversation_id: str) -> Conversation:
-        """The live conversation with this id, or a new one (sandbox included).
+        """The live conversation with this id, or a new one. Never waits for a sandbox.
 
-        A live conversation is returned at once, never waiting on another
-        conversation's sandbox. New conversations start their sandboxes side
-        by side; two requests for the same new id share one start.
+        A new conversation's sandbox starts in the background (`starting`).
         """
         conversation = self._conversations.get(conversation_id)
         if conversation is None:
-            starting = self._starting.get(conversation_id)
-            if starting is None:
-                starting = asyncio.create_task(self._create(conversation_id))
-                self._starting[conversation_id] = starting
-                starting.add_done_callback(lambda _: self._starting.pop(conversation_id, None))
-            # Shielded: a client that disconnects mid-start must not cancel the
-            # start for others waiting on it, or leave a half-made sandbox.
-            conversation = await asyncio.shield(starting)
+            conversation = Conversation(conversation_id, None, None, self._clock())
+            self._conversations[conversation_id] = conversation
+            self._launch(conversation, have_slot=False)
         self.touch(conversation)
         return conversation
 
-    async def _create(self, conversation_id: str) -> Conversation:
+    def _launch(self, conversation: Conversation, *, have_slot: bool) -> None:
+        """Build the agent on a stand-in and start the real sandbox behind it.
+
+        `have_slot`: the conversation already holds a slot (replacing a dead
+        sandbox), so the start does not take another.
+        """
+        if self._provider is None:
+            conversation.agent = self._build_agent(None, self.checkpointer)
+            return
+        lazy = LazySandbox()
+        conversation.agent = self._build_agent(lazy, self.checkpointer)
+        task = asyncio.create_task(self._start_for(conversation, lazy, have_slot))
+        conversation.starting = task
+        self._starts.add(task)
+        task.add_done_callback(self._starts.discard)
+
+    async def _start_for(self, conversation: Conversation, lazy: LazySandbox, have_slot: bool) -> None:
+        try:
+            if have_slot:
+                try:
+                    sandbox = await self._start_sandbox()
+                except BaseException:
+                    self._free_slot()
+                    raise
+            else:
+                sandbox = await self._start_in_new_slot()
+        except BaseException as e:
+            logger.warning("no sandbox for conversation %s: %s", conversation.id, e)
+            lazy.failed(e if isinstance(e, Exception) else RuntimeError("the start was cancelled"))
+            if not isinstance(e, Exception):
+                raise
+            return
+        if self._closing or self._conversations.get(conversation.id) is not conversation:
+            await self._destroy(sandbox)  # the conversation ended while it started
+            self._free_slot()
+            lazy.failed(RuntimeError("the conversation ended"))
+            return
+        conversation.sandbox = sandbox
+        conversation.sandbox_ok_at = self._clock()
+        lazy.ready(sandbox)
+
+    async def _start_in_new_slot(self) -> SandboxBackendProtocol:
+        """A warm sandbox, or a new one in a freed slot. SandboxesBusy if neither comes."""
         warm = await self._obtain()
         try:
             if warm is None:
-                sandbox = await self._start_sandbox()
-            else:
-                sandbox = warm
-                await self._ready_for_conversation(sandbox)
+                return await self._start_sandbox()
+            await self._ready_for_conversation(warm)
+            return warm
         except BaseException:
             self._free_slot()
             raise
         finally:
             self._refill()
-        agent = self._build_agent(sandbox, self.checkpointer)
-        now = self._clock()
-        conversation = Conversation(conversation_id, agent, sandbox, now, sandbox_ok_at=now)
-        self._conversations[conversation_id] = conversation
-        return conversation
 
     def touch(self, conversation: Conversation, sandbox_ok: bool = False) -> None:
         """Mark a conversation as used now, restarting its idle countdown.
@@ -164,15 +200,18 @@ class ConversationManager:
             conversation.sandbox_ok_at = conversation.last_used
 
     async def ensure_sandbox(self, conversation: Conversation) -> bool:
-        """Replace the conversation's sandbox if it stopped answering. True if replaced.
+        """Before a turn: replace a dead sandbox, retry a failed start. True if replaced.
 
         Only a sandbox unused for `check_after_seconds` is checked: one that
         just ran a turn is taken to be alive, so busy conversations pay
-        nothing. Call it holding the conversation's lock. If no new sandbox
-        can be started, the conversation is closed (memory kept) and the
-        error raised; its next message starts over.
+        nothing. A replacement starts in the background, like a first start.
+        Call it holding the conversation's lock.
         """
-        if conversation.sandbox is None or self._provider is None:
+        if self._provider is None:
+            return False
+        if conversation.sandbox is None:
+            if conversation.starting is not None and conversation.starting.done():
+                self._launch(conversation, have_slot=False)  # the last start failed: try again
             return False
         if self._clock() - conversation.sandbox_ok_at < self._check_after_seconds:
             return False
@@ -183,15 +222,7 @@ class ConversationManager:
         logger.warning("the sandbox of conversation %s stopped answering; starting a new one", conversation.id)
         await self._destroy(conversation.sandbox)
         conversation.sandbox = None
-        try:
-            sandbox = await self._start_sandbox()  # reuses the dead sandbox's slot
-        except BaseException:
-            self._conversations.pop(conversation.id, None)
-            self._free_slot()
-            raise
-        conversation.sandbox = sandbox
-        conversation.agent = self._build_agent(sandbox, self.checkpointer)
-        conversation.sandbox_ok_at = self._clock()
+        self._launch(conversation, have_slot=True)  # reuses the dead sandbox's slot
         return True
 
     async def _alive(self, sandbox: SandboxBackendProtocol) -> bool:
@@ -225,7 +256,7 @@ class ConversationManager:
     async def close_all(self) -> None:
         self._closing = True
         # Let sandboxes still starting finish first, so they are deleted too.
-        await asyncio.gather(*self._starting.values(), *self._warming, return_exceptions=True)
+        await asyncio.gather(*self._starts, *self._warming, return_exceptions=True)
         for conversation_id in list(self._conversations):
             await self.close(conversation_id)
         while self._warm:

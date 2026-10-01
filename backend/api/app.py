@@ -99,7 +99,7 @@ def create_app(
         try:
             conversation = await manager.get_or_create(thread_id)
         except Exception as e:
-            yield sse({"type": "error", "message": f"could not start a sandbox: {e}"})
+            yield sse({"type": "error", "message": f"could not start the conversation: {e}"})
             yield sse({"type": "done"})
             return
 
