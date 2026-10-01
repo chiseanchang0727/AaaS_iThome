@@ -3,6 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 import { ArtifactView } from './ArtifactView'
+import { SandboxStatus } from './SandboxStatus'
 import type { Message } from './state'
 import { Steps } from './Steps'
 import { useChat } from './useChat'
@@ -70,6 +71,7 @@ export function ChatPage() {
           New conversation
         </button>
       </header>
+      <SandboxStatus refreshKey={busy} />
 
       <div className="messages">
         {messages.length === 0 ? (

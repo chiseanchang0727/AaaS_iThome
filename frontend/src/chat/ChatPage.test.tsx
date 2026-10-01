@@ -2,8 +2,11 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { jsonResponse, mockFetch, sseResponse } from '../test/fetch'
+import { jsonResponse, mockFetch, sseResponse, type Call } from '../test/fetch'
 import { ChatPage } from './ChatPage'
+
+/** The chat requests only: the page also polls GET /api/sandboxes. */
+const chatCalls = (calls: Call[]) => calls.filter((c) => c.url === '/api/chat')
 
 const TURN = [
   { type: 'thread', thread_id: 'thread-1' },
@@ -50,10 +53,10 @@ describe('ChatPage', () => {
     await ask('first')
     await screen.findByTitle('chart.html')
     await ask('second')
-    await waitFor(() => expect(calls).toHaveLength(2))
+    await waitFor(() => expect(chatCalls(calls)).toHaveLength(2))
 
-    expect(calls[0].body).toEqual({ message: 'first' })
-    expect(calls[1].body).toEqual({ message: 'second', thread_id: 'thread-1' })
+    expect(chatCalls(calls)[0].body).toEqual({ message: 'first' })
+    expect(chatCalls(calls)[1].body).toEqual({ message: 'second', thread_id: 'thread-1' })
   })
 
   it('shows why a message was refused', async () => {
@@ -89,18 +92,20 @@ describe('ChatPage', () => {
     await screen.findByTitle('chart.html')
 
     await userEvent.click(screen.getByRole('button', { name: 'New conversation' }))
-    expect(calls.at(-1)).toMatchObject({ url: '/api/conversations/thread-1', method: 'DELETE' })
+    expect(calls.filter((c) => c.method === 'DELETE')).toEqual([
+      expect.objectContaining({ url: '/api/conversations/thread-1' }),
+    ])
     expect(screen.queryByText('first')).toBeNull()
 
     await ask('fresh start')
-    await waitFor(() => expect(calls.at(-1)?.body).toEqual({ message: 'fresh start' }))
+    await waitFor(() => expect(chatCalls(calls).at(-1)?.body).toEqual({ message: 'fresh start' }))
   })
 
   it('Shift+Enter adds a line instead of sending', async () => {
     const calls = mockFetch(() => sseResponse(TURN))
     render(<ChatPage />)
     await userEvent.type(screen.getByLabelText('Message'), 'line one{Shift>}{Enter}{/Shift}line two')
-    expect(calls).toHaveLength(0)
+    expect(chatCalls(calls)).toHaveLength(0)
     expect(screen.getByLabelText('Message')).toHaveValue('line one\nline two')
   })
 })

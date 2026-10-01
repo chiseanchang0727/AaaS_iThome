@@ -12,6 +12,21 @@ export type ChatEvent =
   | { type: 'notice'; message: string }
   | { type: 'done' }
 
+/** GET /api/sandboxes (ConversationManager.status). */
+export interface SandboxStatus {
+  enabled: boolean
+  provider: string | null
+  max: number | null
+  in_use: number
+  busy: number
+  idle: number
+  starting: number
+  warm: number
+  warming: number
+  waiting: number
+  idle_minutes: number
+}
+
 export interface Column {
   name: string
   type: string

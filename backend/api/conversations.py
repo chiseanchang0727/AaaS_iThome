@@ -118,6 +118,34 @@ class ConversationManager:
         """Sandboxes in use by conversations (not warm ones: they get files when handed out)."""
         return [c.sandbox for c in self._conversations.values() if c.sandbox is not None]
 
+    def status(self) -> dict[str, Any]:
+        """Where every sandbox slot is, for the app's status bar.
+
+        busy: a conversation is answering in it. idle: its conversation is
+        waiting for the next message (deleted after `idle_seconds`).
+        starting: being started for a conversation. warm / warming: ready for
+        the next new conversation / being prepared to be. waiting: starts
+        waiting for a slot.
+        """
+        with_sandbox = [c for c in self._conversations.values() if c.sandbox is not None]
+        busy = sum(c.lock.locked() for c in with_sandbox)
+        return {
+            "enabled": self._provider is not None,
+            "provider": getattr(self._provider, "name", None),
+            "max": self._max_sandboxes,
+            "in_use": self._in_use,
+            "busy": busy,
+            "idle": len(with_sandbox) - busy,
+            "starting": sum(
+                c.sandbox is None and c.starting is not None and not c.starting.done()
+                for c in self._conversations.values()
+            ),
+            "warm": len(self._warm),
+            "warming": self._warming_count(),
+            "waiting": self._waiting,
+            "idle_minutes": self._idle_seconds / 60,
+        }
+
     def start(self) -> None:
         """Begin filling the warm pool. Call once the event loop runs (app startup)."""
         self._refill()
@@ -342,12 +370,16 @@ class ConversationManager:
         """
         if self._closing:
             return
-        while len(self._warm) + len(self._warming) < self._warm_target and self._waiting == 0:
+        while len(self._warm) + self._warming_count() < self._warm_target and self._waiting == 0:
             if not self._try_take_slot():
                 return
             task = asyncio.create_task(self._warm_one())
             self._warming.add(task)
             task.add_done_callback(self._warming.discard)
+
+    def _warming_count(self) -> int:
+        # A finished task stays in the set until its done-callback runs.
+        return sum(not task.done() for task in self._warming)
 
     async def _warm_one(self) -> None:
         try:

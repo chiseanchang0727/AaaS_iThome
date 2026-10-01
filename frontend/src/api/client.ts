@@ -1,5 +1,14 @@
 import { SSEParser } from './sse'
-import type { ChatEvent, Dataset, DatasetKind, EvalRun, EvalRunInfo, HistoryLine, StagedUpload } from './types'
+import type {
+  ChatEvent,
+  Dataset,
+  DatasetKind,
+  EvalRun,
+  EvalRunInfo,
+  HistoryLine,
+  SandboxStatus,
+  StagedUpload,
+} from './types'
 
 /** An error the backend explained; `message` is fit to show the user. */
 export class ApiError extends Error {
@@ -54,6 +63,10 @@ export async function streamChat(
     if (done) break
     for (const event of parser.push(value)) onEvent(event)
   }
+}
+
+export async function getSandboxStatus(): Promise<SandboxStatus> {
+  return json(await fetch('/api/sandboxes'))
 }
 
 export async function endConversation(threadId: string): Promise<void> {

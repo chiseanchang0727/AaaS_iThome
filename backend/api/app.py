@@ -6,6 +6,7 @@
     DELETE /api/conversations/{id}           end a conversation, delete its sandbox
     GET    /api/artifacts/{id}/{path}        a file the agent made
     GET    /api/health
+    GET    /api/sandboxes                    how many sandboxes exist, and what they are doing
     ...plus the upload routes in api/datasets.py and the eval routes in api/evals.py
 """
 
@@ -81,6 +82,11 @@ def create_app(
     @app.get("/api/health")
     async def health():
         return {"ok": True}
+
+    @app.get("/api/sandboxes")
+    async def sandboxes():
+        """How many sandboxes exist and what each is doing (see ConversationManager.status)."""
+        return manager.status()
 
     @app.post("/api/chat")
     async def chat(request: ChatRequest):

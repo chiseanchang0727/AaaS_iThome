@@ -461,3 +461,47 @@ def test_shutdown_deletes_warm_sandboxes_too():
 def test_more_warm_than_allowed_is_refused():
     with pytest.raises(ValueError):
         manager(GatedProvider(), warm_sandboxes=3, max_sandboxes=2)
+
+
+# --- status ------------------------------------------------------------------------
+
+
+def test_status_counts_busy_idle_and_starting():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, max_sandboxes=5)
+        await started(m, "idle")
+        busy = await started(m, "busy")
+        provider.gate.clear()
+        starting = await m.get_or_create("starting")
+        await provider.wait_entered(3)
+        async with busy.lock:  # busy answering a message
+            s = m.status()
+        assert s == {
+            "enabled": True, "provider": "gated", "max": 5, "in_use": 3,
+            "busy": 1, "idle": 1, "starting": 1, "warm": 0, "warming": 0, "waiting": 0,
+            "idle_minutes": 15.0,
+        }
+        provider.release()
+        await starting.starting
+
+    run(scenario())
+
+
+def test_status_counts_the_warm_pool():
+    async def scenario():
+        provider = GatedProvider()
+        m = manager(provider, warm_sandboxes=2)
+        m.start()
+        await provider.wait_entered(2)
+        assert (m.status()["warming"], m.status()["in_use"]) == (2, 2)
+        provider.release()
+        await warmed(m)
+        assert (m.status()["warm"], m.status()["warming"], m.status()["in_use"]) == (2, 0, 2)
+
+    run(scenario())
+
+
+def test_status_without_sandboxes():
+    s = ConversationManager(lambda sandbox, checkpointer: {}, None, idle_seconds=60).status()
+    assert s["enabled"] is False and s["in_use"] == 0 and s["provider"] is None
