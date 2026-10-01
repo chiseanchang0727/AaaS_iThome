@@ -53,7 +53,9 @@ class ConversationManager:
         self._on_sandbox_ready = on_sandbox_ready
         self._clock = clock
         self._conversations: dict[str, Conversation] = {}
-        self._create_lock = asyncio.Lock()
+        self._starting: dict[str, asyncio.Task[Conversation]] = {}
+        """Conversations whose sandbox is being started, so a second request
+        for the same new id waits for that start instead of making another."""
         self.checkpointer = InMemorySaver()
 
     @staticmethod
@@ -67,16 +69,31 @@ class ConversationManager:
         return [c.sandbox for c in self._conversations.values() if c.sandbox is not None]
 
     async def get_or_create(self, conversation_id: str) -> Conversation:
-        """The live conversation with this id, or a new one (sandbox included)."""
-        async with self._create_lock:
-            conversation = self._conversations.get(conversation_id)
-            if conversation is None:
-                sandbox = await self._start_sandbox()
-                agent = self._build_agent(sandbox, self.checkpointer)
-                conversation = Conversation(conversation_id, agent, sandbox, self._clock())
-                self._conversations[conversation_id] = conversation
-            self.touch(conversation)
-            return conversation
+        """The live conversation with this id, or a new one (sandbox included).
+
+        A live conversation is returned at once, never waiting on another
+        conversation's sandbox. New conversations start their sandboxes side
+        by side; two requests for the same new id share one start.
+        """
+        conversation = self._conversations.get(conversation_id)
+        if conversation is None:
+            starting = self._starting.get(conversation_id)
+            if starting is None:
+                starting = asyncio.create_task(self._create(conversation_id))
+                self._starting[conversation_id] = starting
+                starting.add_done_callback(lambda _: self._starting.pop(conversation_id, None))
+            # Shielded: a client that disconnects mid-start must not cancel the
+            # start for others waiting on it, or leave a half-made sandbox.
+            conversation = await asyncio.shield(starting)
+        self.touch(conversation)
+        return conversation
+
+    async def _create(self, conversation_id: str) -> Conversation:
+        sandbox = await self._start_sandbox()
+        agent = self._build_agent(sandbox, self.checkpointer)
+        conversation = Conversation(conversation_id, agent, sandbox, self._clock())
+        self._conversations[conversation_id] = conversation
+        return conversation
 
     def touch(self, conversation: Conversation) -> None:
         """Mark a conversation as used now, restarting its idle countdown."""
@@ -102,6 +119,8 @@ class ConversationManager:
         return idle
 
     async def close_all(self) -> None:
+        # Let sandboxes still starting finish first, so they are deleted too.
+        await asyncio.gather(*self._starting.values(), return_exceptions=True)
         for conversation_id in list(self._conversations):
             await self.close(conversation_id)
 
