@@ -19,6 +19,11 @@ function MessageView({ message }: { message: Message }) {
   const streaming = message.status === 'streaming'
   return (
     <div className="message message-assistant">
+      {message.notices?.map((notice, i) => (
+        <p key={i} className="notice" role="status">
+          {notice}
+        </p>
+      ))}
       <Steps steps={message.steps} streaming={streaming} />
       {message.text && (
         <div className="answer">

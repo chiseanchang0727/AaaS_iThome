@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class ServerConfig(BaseModel):
@@ -21,6 +21,12 @@ class ServerConfig(BaseModel):
 
     sandbox_idle_minutes: float
     """A conversation's sandbox is deleted after this long without a message."""
+
+    max_sandboxes: int | None = Field(default=10, ge=1)
+    """At most this many sandboxes at once (they are billed). None: no limit."""
+
+    sandbox_wait_seconds: float = Field(default=30, ge=0)
+    """How long a new conversation waits for a free sandbox before it is refused."""
 
     max_upload_mb: float
     """Uploads larger than this are refused."""

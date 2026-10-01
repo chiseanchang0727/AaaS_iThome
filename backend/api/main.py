@@ -30,6 +30,8 @@ manager = ConversationManager(
     provider=get_provider(cfg.sandbox),
     idle_seconds=cfg.server.sandbox_idle_minutes * 60,
     on_sandbox_ready=upload_files_hook(store, cfg.sandbox.data_dir),
+    max_sandboxes=cfg.server.max_sandboxes,
+    wait_seconds=cfg.server.sandbox_wait_seconds,
 )
 
 app = create_app(

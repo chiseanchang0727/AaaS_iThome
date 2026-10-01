@@ -124,6 +124,10 @@ button.danger { background: var(--danger); border-color: var(--danger); color: #
   flex: 1; font: inherit; resize: vertical; padding: 10px 12px;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text);
 }
+.notice {
+  margin: 0 0 10px; padding: 8px 10px; font-size: 0.9em;
+  border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 6px;
+}
 .thread-id { font-size: 0.75em; text-align: right; margin: 0; }
 
 /* --- data ------------------------------------------------------------------ */

@@ -5,6 +5,7 @@
     {"type": "tool_result", "id", "name", "content", "error"}   what the tool returned (clipped)
     {"type": "answer",      "text": ...}                        the final answer, markdown
     {"type": "error",       "message": ...}                     the turn failed
+    {"type": "notice",      "message": ...}                     something the user should know (sent by api/app.py)
 """
 
 import json

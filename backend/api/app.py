@@ -37,6 +37,12 @@ ARTIFACT_HEADERS = {
 }
 
 
+SANDBOX_REPLACED = (
+    "The sandbox for this conversation had stopped, so a new one was started. "
+    "Files from earlier messages are gone; the conversation itself is kept."
+)
+
+
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=20_000)
     thread_id: str | None = Field(default=None, pattern=_ID.pattern)
@@ -98,6 +104,8 @@ def create_app(
 
         async with conversation.lock:
             try:
+                if await manager.ensure_sandbox(conversation):
+                    yield sse({"type": "notice", "message": SANDBOX_REPLACED})
                 log = history.start_turn(thread_id, message) if history is not None else None
                 on_message = log.record if log is not None else None
                 async for event in run_turn(conversation.agent, thread_id, message, on_message):
@@ -105,6 +113,7 @@ def create_app(
                 if conversation.sandbox is not None:
                     for event in await _collect_artifacts(conversation, thread_id):
                         yield sse(event)
+                manager.touch(conversation, sandbox_ok=True)
             except Exception as e:
                 yield sse({"type": "error", "message": str(e)})
             finally:

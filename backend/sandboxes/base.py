@@ -51,6 +51,16 @@ class SandboxProvider(ABC):
     def destroy(self, sandbox: SandboxBackendProtocol) -> None:
         """Tear down a sandbox from `create`. Must not raise if already gone."""
 
+    def is_alive(self, sandbox: SandboxBackendProtocol) -> bool:
+        """Does the sandbox still run commands? A cheap round trip.
+
+        Providers with a status API can override this with something cheaper.
+        """
+        try:
+            return sandbox.execute("true").exit_code == 0
+        except Exception:
+            return False
+
     def prepare(self, sandbox: SandboxBackendProtocol) -> None:
         """Get a new sandbox ready: install `packages`. Same for every provider.
 

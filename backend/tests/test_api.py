@@ -79,7 +79,7 @@ def write_output(name: str, content: bytes):
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, turns=(), provider=None, idle_seconds=900, history=None):
+    def __init__(self, tmp_path: Path, turns=(), provider=None, idle_seconds=900, history=None, **manager_options):
         self.now = 0.0
         self.provider = provider if provider is not None else TempDirProvider(tmp_path)
         self.agents: list[ScriptedAgent] = []
@@ -96,7 +96,7 @@ class Harness:
             self.shutdown_called = True
 
         self.manager = ConversationManager(
-            build, self.provider, idle_seconds=idle_seconds, clock=lambda: self.now
+            build, self.provider, idle_seconds=idle_seconds, clock=lambda: self.now, **manager_options
         )
         self.artifacts = tmp_path / "artifacts"
         self.app = create_app(
@@ -348,3 +348,39 @@ def test_shutdown_deletes_every_sandbox(tmp_path):
         chat(client)
     assert len(harness.provider.destroyed) == 2
     assert harness.shutdown_called
+
+
+# --- sandbox limits and recovery -------------------------------------------------
+
+
+class DyingProvider(TempDirProvider):
+    """A TempDirProvider whose sandboxes can be made to stop answering."""
+
+    alive = True
+
+    def is_alive(self, sandbox):
+        return self.alive
+
+
+def test_a_full_house_is_an_error_saying_so(tmp_path):
+    harness = Harness(tmp_path, max_sandboxes=1, wait_seconds=0)
+    with TestClient(harness.app) as client:
+        chat(client)
+        events = chat(client)
+    assert types(events) == ["thread", "error", "done"]
+    assert "all 1 sandboxes are in use" in events[1]["message"]
+
+
+def test_a_dead_sandbox_is_replaced_and_the_user_told(tmp_path):
+    provider = DyingProvider(tmp_path)
+    harness = Harness(tmp_path, provider=provider)
+    with TestClient(harness.app) as client:
+        thread_id = chat(client)[0]["thread_id"]
+        harness.now += 120
+        provider.alive = False
+        events = chat(client, "again", thread_id)
+    assert types(events) == ["thread", "notice", "answer", "done"]
+    assert "new one was started" in events[1]["message"]
+    # the dead one when replaced, then the new one at shutdown
+    assert len(provider.created) == 2 and provider.destroyed == provider.created
+    assert len(harness.agents) == 2  # the agent was rebuilt on the new sandbox

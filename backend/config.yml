@@ -62,4 +62,8 @@ server:
   history_dir: conversations
   # Each open conversation keeps a sandbox (billed) until idle this long.
   sandbox_idle_minutes: 15
+  # At most this many sandboxes at once. When all are taken, a new
+  # conversation waits this long for one to be freed, then is refused.
+  max_sandboxes: 10
+  sandbox_wait_seconds: 30
   max_upload_mb: 50

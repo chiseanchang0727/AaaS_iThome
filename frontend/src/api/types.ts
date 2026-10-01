@@ -9,6 +9,7 @@ export type ChatEvent =
   | { type: 'answer'; text: string }
   | { type: 'artifact'; name: string; url: string; kind: string }
   | { type: 'error'; message: string }
+  | { type: 'notice'; message: string }
   | { type: 'done' }
 
 export interface Column {

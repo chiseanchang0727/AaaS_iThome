@@ -19,6 +19,8 @@ export interface Message {
   artifacts: Artifact[]
   status: 'streaming' | 'done' | 'error'
   error?: string
+  /** Things the user should know about this turn, e.g. the sandbox was replaced. */
+  notices?: string[]
 }
 
 export interface ChatState {
@@ -83,6 +85,8 @@ export function chatReducer(state: ChatState, action: Action): ChatState {
           }))
         case 'error':
           return updateLast(state, (m) => ({ ...m, status: 'error', error: event.message }))
+        case 'notice':
+          return updateLast(state, (m) => ({ ...m, notices: [...(m.notices ?? []), event.message] }))
         case 'done':
           return {
             ...updateLast(state, (m) => (m.status === 'streaming' ? { ...m, status: 'done' } : m)),
