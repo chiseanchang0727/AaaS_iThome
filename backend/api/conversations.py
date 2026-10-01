@@ -69,6 +69,8 @@ class Conversation:
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     starting: asyncio.Task[None] | None = None
     """The sandbox start running in the background, if any."""
+    stand_in: LazySandbox | None = None
+    """What the agent was built on; its `on_step` hears what each code step cost."""
     announced: set[str] = field(default_factory=set)
     """Artifact paths already sent to the client, so each is sent once."""
 
@@ -211,6 +213,7 @@ class ConversationManager:
             conversation.agent = self._build_agent(None, self.checkpointer)
             return
         lazy = LazySandbox()
+        conversation.stand_in = lazy
         conversation.agent = self._build_agent(lazy, self.checkpointer)
         task = asyncio.create_task(self._start_for(conversation, lazy, have_slot))
         conversation.starting = task

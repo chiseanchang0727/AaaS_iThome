@@ -16,6 +16,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
 from api import ConversationManager, HistoryStore, create_app
+from api.history import to_messages
 from api.events import RESULT_CHARS
 from sandboxes import SandboxProvider
 
@@ -416,3 +417,17 @@ def test_a_dead_sandbox_is_replaced_and_the_user_told(tmp_path):
     # the dead one when replaced, then the new one at shutdown
     assert len(provider.created) == 2 and provider.destroyed == provider.created
     assert len(harness.agents) == 2  # the agent was rebuilt on the new sandbox
+
+
+
+def test_each_code_step_is_recorded_with_what_it_cost(tmp_path):
+    history = HistoryStore(tmp_path / "history", clock=lambda: "t")
+    turn = [lambda sandbox: sandbox.execute("python3 -c 'print(1)'"),
+            {"model": {"messages": [AIMessage("done")]}}]
+    harness = Harness(tmp_path, [turn], history=history)
+    with TestClient(harness.app) as client:
+        thread_id = chat(client)[0]["thread_id"]
+    [step] = [r for r in history.read(thread_id) if r["role"] == "sandbox_step"]
+    assert step["turn"] == 1 and step["command"] == "python3 -c 'print(1)'"
+    assert step["exit_code"] == 0 and step["peak_memory_mb"] > 0
+    assert "sandbox_step" not in {type(m).__name__ for m in to_messages(history.read(thread_id))}

@@ -14,6 +14,8 @@ Thread-safe: the agent calls sandbox methods from worker threads.
 """
 
 import asyncio
+import logging
+from collections.abc import Callable
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 
@@ -30,8 +32,11 @@ from deepagents.backends.protocol import (
     SandboxBackendProtocol,
     WriteResult,
     _method_accepts_max_count,
-    execute_accepts_timeout,
 )
+
+from .metering import StepMeasure, run_measured
+
+log = logging.getLogger(__name__)
 
 START_TIMEOUT = 180.0
 """Seconds a call waits for the sandbox: a slot (up to 30s), then the start (~12s)."""
@@ -47,6 +52,9 @@ class LazySandbox(SandboxBackendProtocol):
     def __init__(self, start_timeout: float = START_TIMEOUT) -> None:
         self._future: Future[SandboxBackendProtocol] = Future()
         self._start_timeout = start_timeout
+        self.on_step: Callable[[StepMeasure], None] | None = None
+        """Called with what each command cost (sandboxes/metering.py), from
+        the worker thread that ran it. Set per turn by the API."""
 
     def ready(self, sandbox: SandboxBackendProtocol) -> None:
         self._future.set_result(sandbox)
@@ -84,9 +92,13 @@ class LazySandbox(SandboxBackendProtocol):
             sandbox = self._real()
         except SandboxUnavailable as e:
             return ExecuteResponse(output=self._why(e), exit_code=1)
-        if timeout is not None and execute_accepts_timeout(type(sandbox)):
-            return sandbox.execute(command, timeout=timeout)
-        return sandbox.execute(command)
+        result, measure = run_measured(sandbox, command, timeout)
+        if self.on_step is not None:
+            try:
+                self.on_step(measure)
+            except Exception:
+                log.warning("could not record a sandbox step", exc_info=True)
+        return result
 
     def ls(self, path: str) -> LsResult:
         try:

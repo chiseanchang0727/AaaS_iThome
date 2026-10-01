@@ -115,6 +115,8 @@ def create_app(
                     yield sse({"type": "notice", "message": SANDBOX_REPLACED})
                 log = history.start_turn(thread_id, message) if history is not None else None
                 on_message = log.record if log is not None else None
+                if conversation.stand_in is not None:
+                    conversation.stand_in.on_step = log.record_step if log is not None else None
                 async for event in run_turn(conversation.agent, thread_id, message, on_message):
                     yield sse(event)
                 if conversation.sandbox is not None:

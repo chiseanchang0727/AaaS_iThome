@@ -5,6 +5,10 @@
     {"id": "c07e…", "previous": "41ab…", "turn": 1, "role": "tool", "tool_call_id": "c1", "name": "query_database", "content": "...", "error": false, "ts": "..."}
     {"id": "5d19…", "previous": "c07e…", "turn": 1, "role": "assistant", "content": "Music has the most views: 4.2M.", "ts": "..."}
 
+A code step run in the sandbox also gets a line with what it cost (role
+`sandbox_step`: command, seconds, cpu_seconds, peak_memory_mb, ...); readers
+that rebuild messages skip it.
+
 Every line has a unique `id` and the `id` of the line before it, `previous`
 (null on the first line): the order survives without the file, e.g. as rows
 in a database.
@@ -21,6 +25,7 @@ be given instead. One line maps to one row when this moves to a database.
 import json
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -54,6 +59,9 @@ class HistoryStore:
         self.root = Path(root)
         self._clock = clock
         self._new_id = new_id
+        self._lock = threading.Lock()
+        """Lines can come from the event loop and from worker threads (sandbox
+        steps): one at a time, so lines and the `previous` chain stay whole."""
 
     def path(self, thread_id: str) -> Path:
         return self.root / f"{thread_id}.jsonl"
@@ -112,11 +120,16 @@ class TurnLog:
         """The id of the last line written, which the next line points back to."""
 
     def write(self, fields: dict[str, Any]) -> None:
-        line_id = self.store._new_id()
-        self.store.append(self.thread_id, {
-            "id": line_id, "previous": self.previous, "turn": self.turn, **fields, "ts": self.store._clock(),
-        })
-        self.previous = line_id
+        with self.store._lock:
+            line_id = self.store._new_id()
+            self.store.append(self.thread_id, {
+                "id": line_id, "previous": self.previous, "turn": self.turn, **fields, "ts": self.store._clock(),
+            })
+            self.previous = line_id
+
+    def record_step(self, measure: Any) -> None:
+        """What a code step in the sandbox cost (sandboxes/metering.StepMeasure)."""
+        self.write({"role": "sandbox_step", **measure.to_dict()})
 
     def record(self, message: BaseMessage) -> None:
         if isinstance(message, AIMessage):
