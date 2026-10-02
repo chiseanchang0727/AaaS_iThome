@@ -75,7 +75,8 @@ describe('LoadPage', () => {
   it('a bar in the chart opens its conversation', async () => {
     mockFetch((call) => jsonResponse(call.url.startsWith('/api/load/conversations/') ? TIMELINE : LOAD))
     render(<LoadPage />)
-    await userEvent.click(await screen.findByRole('button', { name: 'Open the conversation of a 973 MB step' }))
+    // conversations are numbered from the oldest step: bob's (1), then alice's (2)
+    await userEvent.click(await screen.findByRole('button', { name: 'Open conversation 2' }))
     expect(await screen.findByRole('region', { name: 'Conversation timeline' })).toHaveTextContent(
       'Reached the limit: moving to a bigger sandbox, 1 GB → 4 GB',
     )

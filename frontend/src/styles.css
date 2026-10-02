@@ -265,10 +265,14 @@ td.arm-cell > * { margin-right: 8px; }
 .section-hint { margin: -6px 0 0; font-size: 0.88em; }
 .conversations-table .prompt { max-width: 340px; min-width: 200px; }
 .detail-row > td { padding: 0 0 12px; background: transparent; }
-.chart .bar-group { cursor: pointer; }
-.chart .bar-group:hover .bar { opacity: 0.8; }
+.chart .conv-group { cursor: pointer; }
+.chart .conv-band { fill: var(--surface-2); opacity: 0.6; }
+.chart .conv-group:hover .conv-band { opacity: 1; }
+.chart .conv-label { fill: var(--text); font-size: 12px; font-weight: 600; }
+.chart .move-mark { fill: var(--good); font-size: 11px; font-weight: 600; }
+.chart .move-arrow { fill: none; stroke: var(--good); stroke-width: 1.5; stroke-dasharray: 3 3; }
 .chart .bar-faded { opacity: 0.25; }
-.chart .bar-selected .bar { stroke: var(--text); stroke-width: 1.5; }
+.chart .bar-selected .conv-band { opacity: 1; stroke: var(--border); }
 .nowrap { white-space: nowrap; }
 .meter { display: block; width: 90px; height: 4px; margin-top: 3px; background: var(--surface-2); border-radius: 2px; }
 .meter-fill { display: block; height: 100%; background: var(--chart-b); border-radius: 2px; }

@@ -3,6 +3,7 @@ import { Fragment, useEffect, useState } from 'react'
 import { getLoad } from '../api/client'
 import type { Load, LoadSummary } from '../api/types'
 import { ConversationDetail } from './ConversationDetail'
+import { conversationNumbers } from './groups'
 import { MemoryChart } from './MemoryChart'
 
 const POLL_MS = 10_000
@@ -36,6 +37,14 @@ function Totals({ summary, limit }: { summary: LoadSummary; limit: number | null
       ))}
     </div>
   )
+}
+
+/** Conversations with the chart's numbers, in the chart's order (unnumbered ones last). */
+function numbered(load: Load) {
+  const numbers = conversationNumbers(load.steps)
+  return load.conversations
+    .map((c) => ({ c, number: numbers.get(c.conversation) }))
+    .sort((a, b) => (a.number ?? Infinity) - (b.number ?? Infinity))
 }
 
 /** What the agent's code has cost in the sandboxes, from each step's measurements. */
@@ -143,12 +152,12 @@ export function LoadPage() {
             <table className="turns conversations-table" aria-label="Conversations">
               <thead>
                 <tr>
-                  <th>Account</th><th>First question</th><th>Steps</th><th>Run</th><th>CPU</th>
+                  <th>#</th><th>Account</th><th>First question</th><th>Steps</th><th>Run</th><th>CPU</th>
                   <th>Peak memory</th><th>Out of memory</th><th>Moved to bigger</th><th>Sandbox</th>
                 </tr>
               </thead>
               <tbody>
-                {load.conversations.map((c) => (
+                {numbered(load).map(({ c, number }) => (
                   <Fragment key={c.conversation}>
                     <tr
                       id={`conversation-${c.conversation}`}
@@ -156,6 +165,7 @@ export function LoadPage() {
                       onClick={() => setOpen(open === c.conversation ? null : c.conversation)}
                       aria-expanded={open === c.conversation}
                     >
+                      <td className="num">{number ?? ''}</td>
                       <td>{c.account}</td>
                       <td className="prompt">{c.question}</td>
                       <td>{c.steps}</td>
@@ -171,7 +181,7 @@ export function LoadPage() {
                     </tr>
                     {open === c.conversation && (
                       <tr className="detail-row">
-                        <td colSpan={9}>
+                        <td colSpan={10}>
                           <ConversationDetail id={c.conversation} onClose={() => setOpen(null)} />
                         </td>
                       </tr>
