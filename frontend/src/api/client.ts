@@ -7,6 +7,7 @@ import type {
   EvalRun,
   EvalRunInfo,
   HistoryLine,
+  Load,
   SandboxStatus,
   StagedUpload,
 } from './types'
@@ -68,6 +69,10 @@ export async function streamChat(
 
 export async function getSandboxStatus(): Promise<SandboxStatus> {
   return json(await fetch('/api/sandboxes', { headers: accountHeaders() }))
+}
+
+export async function getLoad(account: string | null): Promise<Load> {
+  return json(await fetch(account ? `/api/load?account=${encodeURIComponent(account)}` : '/api/load'))
 }
 
 export async function endConversation(threadId: string): Promise<void> {

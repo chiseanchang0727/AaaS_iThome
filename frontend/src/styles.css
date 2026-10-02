@@ -245,6 +245,33 @@ td.arm-cell > * { margin-right: 8px; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; }
 
+/* --- load ------------------------------------------------------------------ */
+
+.main:has(.load-page) { max-width: 1240px; }
+.load-page { display: flex; flex-direction: column; gap: 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.card {
+  display: flex; flex-direction: column; gap: 2px; padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.card-label { font-size: 0.82em; color: var(--muted); }
+.card-value { font-size: 1.4rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.card-note { font-size: 0.78em; color: var(--muted); }
+.card-bad .card-value { color: var(--danger); }
+.chart .bar { fill: var(--chart-b); }
+.chart .bar-oom { fill: var(--danger); }
+.chart .limit { stroke: var(--danger); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.steps-table td { vertical-align: middle; }
+.steps-table .prompt { max-width: 260px; min-width: 160px; }
+.command {
+  display: block; max-width: 340px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  background: var(--code-bg); padding: 2px 6px; border-radius: 4px;
+}
+.nowrap { white-space: nowrap; }
+.meter { display: block; width: 90px; height: 4px; margin-top: 3px; background: var(--surface-2); border-radius: 2px; }
+.meter-fill { display: block; height: 100%; background: var(--chart-b); border-radius: 2px; }
+.meter-oom { background: var(--danger); }
+
 @media (max-width: 640px) {
   .kinds { grid-template-columns: 1fr; }
   .message-user { max-width: 92%; }

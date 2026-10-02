@@ -66,6 +66,10 @@ class HistoryStore:
     def path(self, thread_id: str) -> Path:
         return self.root / f"{thread_id}.jsonl"
 
+    def thread_ids(self) -> list[str]:
+        """Every conversation with a history file."""
+        return sorted(p.stem for p in self.root.glob("*.jsonl")) if self.root.exists() else []
+
     def read(self, thread_id: str) -> list[dict[str, Any]]:
         """Every line of a conversation, oldest first. [] if it has none.
 

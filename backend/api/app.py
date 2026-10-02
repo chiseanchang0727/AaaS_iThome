@@ -7,6 +7,7 @@
     GET    /api/artifacts/{id}/{path}        a file the agent made
     GET    /api/health
     GET    /api/sandboxes                    how many sandboxes exist, and what they are doing
+    GET    /api/load                         what the agent's code steps cost (api/load.py)
     ...plus the upload routes in api/datasets.py and the eval routes in api/evals.py
 """
 

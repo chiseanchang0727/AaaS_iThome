@@ -12,6 +12,46 @@ export type ChatEvent =
   | { type: 'notice'; message: string }
   | { type: 'done' }
 
+/** Totals for a set of code steps (backend/api/load.py summarize). */
+export interface LoadSummary {
+  steps: number
+  conversations: number
+  run_seconds: number
+  cpu_seconds: number
+  overhead_seconds: number
+  peak_memory_mb: number | null
+  average_peak_memory_mb: number | null
+  out_of_memory: number
+  failed: number
+}
+
+/** One code step the agent ran in a sandbox. Times and memory are null when unmeasured. */
+export interface LoadStep {
+  conversation: string
+  account: string
+  turn: number
+  prompt: string
+  ts: string
+  command: string
+  exit_code: number | null
+  seconds: number | null
+  run_seconds: number | null
+  cpu_seconds: number | null
+  peak_memory_mb: number | null
+  memory_limit_mb: number | null
+  out_of_memory: boolean
+}
+
+/** GET /api/load. */
+export interface Load {
+  account: string | null
+  accounts: string[]
+  memory_limit_mb: number | null
+  summary: LoadSummary
+  per_account: Record<string, LoadSummary>
+  steps: LoadStep[]
+}
+
 /** GET /api/sandboxes (ConversationManager.status). */
 export interface SandboxStatus {
   enabled: boolean

@@ -17,6 +17,7 @@ from .app import create_app
 from .conversations import ConversationManager
 from .datasets import datasets_router, upload_files_hook
 from .evals import evals_router
+from .load import load_router
 from .history import HistoryStore
 
 store = DatasetStore(
@@ -39,6 +40,8 @@ manager = ConversationManager(
     max_per_account=cfg.server.max_sandboxes_per_account,
 )
 
+history = HistoryStore(cfg.server.history_dir)
+
 app = create_app(
     manager,
     artifacts_dir=cfg.server.artifacts_dir,
@@ -47,7 +50,8 @@ app = create_app(
     routers=[
         datasets_router(store, cfg.sandbox.data_dir, manager.live_sandboxes),
         evals_router(Path("evals/memory/out/runs")),
+        load_router(history),
     ],
-    history=HistoryStore(cfg.server.history_dir),
+    history=history,
     default_account=cfg.server.default_account,
 )
