@@ -47,6 +47,8 @@ sandbox:
     - pyarrow
     - polars
     - plotly
+    # Queries Parquet files bigger than the sandbox's memory (see SANDBOX_PROMPT).
+    - duckdb
 
   # Paths inside the sandbox. Home directories differ between providers.
   data_dir: /home/daytona/data

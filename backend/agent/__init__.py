@@ -48,9 +48,25 @@ and for charts and report files. Get data into it with export_query, which
 saves a query's rows as a Parquet file in {data_dir}; then work on it in
 Python. execute runs shell commands, not Python: write your code to a .py file
 with write_file, then run it with execute (`python3 /path/to/script.py`). Use
-polars, not pandas: load the file with `pl.read_parquet(path)`.
+polars, not pandas.
 Save every chart or report you make to {output_dir}: files there are handed to
 the user after the run.
+
+The sandbox has little memory (about 1 GB), so keep the data you load small:
+- Do the heavy work in SQL: filter, join and aggregate in the query, and export
+  only the rows and columns the analysis needs, not whole tables.
+- For a file you have not checked, look at its size before loading it:
+  `pl.scan_parquet(path).select(pl.len()).collect()` and `pl.read_parquet_schema(path)`.
+- Compute on large files with DuckDB, which reads only the columns it needs and
+  works through files bigger than memory, including medians, percentiles and
+  distinct counts that polars cannot stream:
+  `import duckdb; con = duckdb.connect(); con.execute("SET memory_limit='600MB'")`, then
+  `con.sql("SELECT device, median(x) FROM '/path/file.parquet' GROUP BY device").pl()`.
+- Use polars for small data and for shaping results for charts. Load a large
+  file with polars only lazily and only the columns you need:
+  `pl.scan_parquet(path).select(...).collect(engine="streaming")`.
+- If a command is killed for running out of memory, do not run the same code
+  again: select fewer columns, aggregate earlier, or switch to DuckDB.
 
 Make charts with plotly (plotly.express accepts polars DataFrames) and save
 each as interactive HTML, which the user sees rendered in the chat:
