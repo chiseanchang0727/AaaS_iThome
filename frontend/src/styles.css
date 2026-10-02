@@ -270,6 +270,7 @@ td.arm-cell > * { margin-right: 8px; }
 .chart .conv-group:hover .conv-band { opacity: 1; }
 .chart .conv-label { fill: var(--text); font-size: 12px; font-weight: 600; }
 .chart .move-mark { fill: var(--good); font-size: 11px; font-weight: 600; }
+.chart .rewrite-label { fill: #e0a030; font-weight: 600; }
 .chart .move-arrow { fill: none; stroke: var(--good); stroke-width: 1.5; stroke-dasharray: 3 3; }
 .chart .bar-faded { opacity: 0.25; }
 .chart .bar-selected .conv-band { opacity: 1; stroke: var(--border); }

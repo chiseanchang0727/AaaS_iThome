@@ -33,6 +33,7 @@ const LOAD: Load = {
     conversation: 'c-alice', account: 'alice', question: 'the 3.2 GB matrix', turns: 1, steps: 2,
     run_seconds: 44.2, cpu_seconds: 44.2,
     out_of_memory: 1, upgrades: 1, upgrade_failures: 0, peak_memory_mb: 3084, sandbox_gb: 4, last: '2026-10-02T10:01:00Z',
+    rewrites: 1, resolved_by: 'bigger sandbox',
   }],
 }
 
@@ -52,7 +53,7 @@ const TIMELINE: ConversationTimeline = {
     { ts: at(31), turn: 1, kind: 'event', event: 'switched', memory_gb: 4 },
     { ts: at(32), turn: 1, kind: 'event', event: 'old_deleted', memory_gb: 1, memory_used_gb: 5, seconds: 0.4 },
     { ts: at(66), turn: 1, kind: 'step', command: 'python3 m.py', exit_code: 0, seconds: 36, run_seconds: 34.6,
-      cpu_seconds: 34.8, peak_memory_mb: 3084, memory_limit_mb: 4096, out_of_memory: false },
+      cpu_seconds: 34.8, peak_memory_mb: 3084, memory_limit_mb: 4096, out_of_memory: false, strategy: 'bigger sandbox' },
     { ts: at(70), turn: 1, kind: 'answer', text: 'The mean is 0.5.' },
   ],
 }
@@ -68,7 +69,7 @@ describe('LoadPage', () => {
     expect(screen.getByRole('img', { name: 'Peak memory per step' })).toBeInTheDocument()
 
     const row = within(screen.getByRole('table', { name: 'Conversations' })).getByRole('row', { name: /the 3.2 GB matrix/ })
-    for (const text of ['alice', '44.2s', '3084 MB', '4 GB']) expect(row).toHaveTextContent(text)
+    for (const text of ['alice', '44.2s', '3084 MB', '4 GB', 'bigger sandbox']) expect(row).toHaveTextContent(text)
     expect(screen.queryByRole('table', { name: 'Code steps' })).toBeNull() // steps live in each conversation
     expect(screen.queryByRole('region', { name: 'Conversation timeline' })).toBeNull() // closed by default
   })
@@ -99,7 +100,7 @@ describe('LoadPage', () => {
       'Work folder copied over (40 KB)',
       'Switched to the 4 GB sandbox',
       'Old 1 GB sandbox deleted',
-      'Code step done: 3084 MB of 4096 MB',
+      'In the bigger sandbox · Code step done: 3084 MB of 4096 MB',
     ]) {
       expect(detail).toHaveTextContent(text)
     }

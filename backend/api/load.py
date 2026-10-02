@@ -24,6 +24,56 @@ def _account(records: list[dict[str, Any]]) -> str:
     return next((r["account"] for r in records if r.get("role") == "user" and r.get("account")), UNKNOWN_ACCOUNT)
 
 
+def step_roles(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """What each code step was, by its line id, worked out from the log:
+
+        first            no out-of-memory kill yet in this conversation
+        rewrite (n)      after a kill, a changed attempt: another command, or the
+                         same one after write_file / edit_file
+        same code        after a kill, the same command with no file changed
+        bigger sandbox   after the conversation moved to a bigger sandbox
+
+    The same rule as the stand-in (sandboxes/lazy.py), applied to the record.
+    """
+    roles: dict[str, dict[str, Any]] = {}
+    changes, kills, rewrites, moved = 0, 0, 0, False
+    killed: set[tuple[str, int]] = set()
+    for r in records:
+        role = r.get("role")
+        if role == "assistant":
+            changes += sum(c.get("name") in ("write_file", "edit_file") for c in r.get("tool_calls") or [])
+        elif role == "sandbox_event" and r.get("event") == "switched":
+            moved = True
+        elif role == "sandbox_step":
+            attempt = (r.get("command", ""), changes)
+            if moved:
+                info: dict[str, Any] = {"strategy": "bigger sandbox"}
+            elif kills == 0:
+                info = {"strategy": "first"}
+            elif attempt in killed:
+                info = {"strategy": "same code"}
+            else:
+                rewrites += 1
+                info = {"strategy": "rewrite", "rewrite": rewrites}
+            if r.get("signal") == 9 and _near_limit(r):
+                kills += 1
+                killed.add(attempt)
+            roles[r.get("id", "")] = info
+    return roles
+
+
+def resolution(records: list[dict[str, Any]], roles: dict[str, dict[str, Any]]) -> str | None:
+    """How an out-of-memory kill ended: 'rewrite', 'bigger sandbox', 'not resolved', or None (no kill)."""
+    steps = [r for r in records if r.get("role") == "sandbox_step"]
+    if not any(r.get("signal") == 9 and _near_limit(r) for r in steps):
+        return None
+    last = steps[-1]
+    if last.get("exit_code") != 0:
+        return "not resolved"
+    strategy = roles.get(last.get("id", ""), {}).get("strategy")
+    return "bigger sandbox" if strategy == "bigger sandbox" else "rewrite"
+
+
 def conversation_rows(history: HistoryStore) -> list[dict[str, Any]]:
     """One row per conversation that ran code: what it cost and what happened to its sandbox."""
     rows = []
@@ -35,6 +85,7 @@ def conversation_rows(history: HistoryStore) -> list[dict[str, Any]]:
             continue
         peaks = [r["peak_memory_mb"] for r in steps if r.get("peak_memory_mb") is not None]
         sizes = [r["memory_gb"] for r in events if r.get("event") in ("sandbox_ready", "switched") and r.get("memory_gb")]
+        roles = step_roles(records)
         rows.append({
             "conversation": thread_id,
             "account": _account(records),
@@ -45,6 +96,8 @@ def conversation_rows(history: HistoryStore) -> list[dict[str, Any]]:
             "cpu_seconds": round(sum(r.get("cpu_seconds") or 0 for r in steps), 2),
             "out_of_memory": sum(r.get("signal") == 9 and _near_limit(r) for r in steps),
             "upgrades": sum(r.get("event") == "switched" for r in events),
+            "rewrites": sum(v["strategy"] == "rewrite" for v in roles.values()),
+            "resolved_by": resolution(records, roles),
             "upgrade_failures": sum(r.get("event") == "upgrade_failed" for r in events),
             "peak_memory_mb": max(peaks, default=None),
             "sandbox_gb": sizes[-1] if sizes else None,
@@ -71,6 +124,7 @@ def timeline(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """The conversation as it happened: questions, the agent's actions, code steps,
     sandbox events and answers, in order. Tool results are left out (see the chat)."""
     items = []
+    roles = step_roles(records)
     for r in records:
         role, base = r.get("role"), {"ts": r.get("ts", ""), "turn": r.get("turn")}
         if role == "user":
@@ -83,7 +137,8 @@ def timeline(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         elif role == "sandbox_step":
             items.append({**base, "kind": "step", **{k: r.get(k) for k in (
                 "command", "exit_code", "seconds", "run_seconds", "cpu_seconds", "peak_memory_mb",
-                "memory_limit_mb", "signal")}, "out_of_memory": bool(r.get("signal") == 9 and _near_limit(r))})
+                "memory_limit_mb", "signal")}, "out_of_memory": bool(r.get("signal") == 9 and _near_limit(r)),
+                **roles.get(r.get("id", ""), {})})
         elif role == "sandbox_event":
             fields = {k: v for k, v in r.items() if k not in ("id", "previous", "turn", "role", "ts", "event")}
             items.append({**base, "kind": "event", "event": r.get("event"), **fields})
@@ -97,6 +152,7 @@ def collect_steps(history: HistoryStore) -> list[dict[str, Any]]:
         records = history.read(thread_id)
         prompts = {r["turn"]: r["content"] for r in records if r.get("role") == "user"}
         account = _account(records)
+        roles = step_roles(records)
         for r in records:
             if r.get("role") != "sandbox_step":
                 continue
@@ -115,6 +171,7 @@ def collect_steps(history: HistoryStore) -> list[dict[str, Any]]:
                 "peak_memory_mb": peak,
                 "memory_limit_mb": limit,
                 "out_of_memory": bool(r.get("signal") == 9 and limit and peak and peak >= 0.8 * limit),
+                **roles.get(r.get("id", ""), {}),
             })
     steps.sort(key=lambda s: s["ts"])
     return steps

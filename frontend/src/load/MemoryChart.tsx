@@ -82,8 +82,13 @@ export function MemoryChart({
                     {s.memory_limit_mb !== null && (
                       <line x1={x - 4} x2={x + width + 4} y1={y(s.memory_limit_mb)} y2={y(s.memory_limit_mb)} className="limit" />
                     )}
-                    <text x={x + width / 2} y={y(0) + 13} className="tick" textAnchor="middle">
-                      step {i + 1}
+                    <text
+                      x={x + width / 2}
+                      y={y(0) + 13}
+                      className={s.strategy === 'rewrite' ? 'tick rewrite-label' : 'tick'}
+                      textAnchor="middle"
+                    >
+                      {s.strategy === 'rewrite' ? `rewrite ${s.rewrite}` : s.strategy === 'same code' ? 'same again' : `step ${i + 1}`}
                     </text>
                   </g>
                 )

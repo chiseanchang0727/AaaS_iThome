@@ -153,7 +153,8 @@ export function LoadPage() {
               <thead>
                 <tr>
                   <th>#</th><th>Account</th><th>First question</th><th>Steps</th><th>Run</th><th>CPU</th>
-                  <th>Peak memory</th><th>Out of memory</th><th>Moved to bigger</th><th>Sandbox</th>
+                  <th>Peak memory</th><th>Out of memory</th><th>Rewrites</th><th>Moved to bigger</th>
+                  <th>Resolved by</th><th>Sandbox</th>
                 </tr>
               </thead>
               <tbody>
@@ -173,15 +174,19 @@ export function LoadPage() {
                       <td className="nowrap">{seconds(c.cpu_seconds)}</td>
                       <td className="nowrap">{mb(c.peak_memory_mb)}</td>
                       <td className={c.out_of_memory ? 'worse' : ''}>{c.out_of_memory}</td>
+                      <td>{c.rewrites}</td>
                       <td className={c.upgrades ? 'better' : ''}>
                         {c.upgrades}
                         {c.upgrade_failures > 0 && <span className="worse"> ({c.upgrade_failures} failed)</span>}
+                      </td>
+                      <td className={c.resolved_by === 'not resolved' ? 'worse nowrap' : c.resolved_by ? 'better nowrap' : 'muted'}>
+                        {c.resolved_by ?? '–'}
                       </td>
                       <td className="nowrap">{c.sandbox_gb === null ? '–' : `${c.sandbox_gb} GB`}</td>
                     </tr>
                     {open === c.conversation && (
                       <tr className="detail-row">
-                        <td colSpan={10}>
+                        <td colSpan={12}>
                           <ConversationDetail id={c.conversation} onClose={() => setOpen(null)} />
                         </td>
                       </tr>

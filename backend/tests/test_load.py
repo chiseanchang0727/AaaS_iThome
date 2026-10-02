@@ -120,3 +120,60 @@ def test_a_conversations_timeline_mixes_actions_steps_and_events(tmp_path):
     assert body["timeline"][3]["to_gb"] == 4
     assert client(history).get("/api/load/conversations/nope").status_code == 404
     assert client(history).get("/api/load/conversations/..%2Fx").status_code == 404
+
+
+def test_steps_are_marked_first_rewrite_same_code_or_bigger(tmp_path):
+    from langchain_core.messages import AIMessage
+
+    from api.load import resolution, step_roles
+
+    def write(log, path):
+        log.record(AIMessage("", tool_calls=[{"id": path, "name": "write_file", "args": {"file_path": path}, "type": "tool_call"}]))
+
+    killed = dict(exit_code=137, signal=9)
+    history = store(tmp_path)
+    log = history.start_turn("c", "median with polars only", "alice")
+    log.record_step(step("python3 check.py", 0.2, 0.2, 50))                    # first
+    log.record_step(step("python3 median.py", 2, 2, 965, **killed))            # first, killed
+    log.record_step(step("python3 median.py", 2, 2, 965, **killed))            # same code
+    write(log, "/w/median.py")
+    log.record_step(step("python3 median.py", 2, 2, 970, **killed))            # rewrite 1
+    log.record_step(step("python3 counts.py", 1, 1, 217))                      # rewrite 2
+
+    records = history.read("c")
+    roles = [step_roles(records)[r["id"]] for r in records if r["role"] == "sandbox_step"]
+    assert roles == [{"strategy": "first"}, {"strategy": "first"}, {"strategy": "same code"},
+                     {"strategy": "rewrite", "rewrite": 1}, {"strategy": "rewrite", "rewrite": 2}]
+    assert resolution(records, step_roles(records)) == "rewrite"
+
+    [row] = client(history).get("/api/load").json()["conversations"]
+    assert (row["rewrites"], row["resolved_by"]) == (2, "rewrite")
+    timeline = client(history).get("/api/load/conversations/c").json()["timeline"]
+    assert [i.get("rewrite") for i in timeline if i["kind"] == "step"] == [None, None, None, 1, 2]
+
+
+def test_a_move_marks_later_steps_and_resolves_by_bigger_sandbox(tmp_path):
+    from api.load import resolution, step_roles
+
+    history = store(tmp_path)
+    log = history.start_turn("c", "the matrix", "alice")
+    log.record_step(step("python3 m.py", 2, 2, 980, exit_code=137, signal=9))
+    log.record_event("switched", {"memory_gb": 4})
+    log.record_step(StepMeasure("python3 m.py", 0, 6, 5, 5, 3085, None, 4096))
+    records = history.read("c")
+    roles = step_roles(records)
+    assert [roles[r["id"]]["strategy"] for r in records if r["role"] == "sandbox_step"] == ["first", "bigger sandbox"]
+    assert resolution(records, roles) == "bigger sandbox"
+
+
+def test_no_kill_means_nothing_to_resolve_and_a_failed_end_is_not_resolved(tmp_path):
+    from api.load import resolution, step_roles
+
+    history = store(tmp_path)
+    history.start_turn("ok", "q", "a").record_step(step("python3 x.py", 1, 1, 100))
+    log = history.start_turn("bad", "q", "a")
+    log.record_step(step("python3 x.py", 1, 1, 980, exit_code=137, signal=9))
+    log.record_step(step("python3 y.py", 1, 1, 980, exit_code=137, signal=9))
+    for thread, expected in (("ok", None), ("bad", "not resolved")):
+        records = history.read(thread)
+        assert resolution(records, step_roles(records)) == expected

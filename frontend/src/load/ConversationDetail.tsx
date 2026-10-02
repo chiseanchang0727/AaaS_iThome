@@ -113,9 +113,14 @@ function Item({ item, start }: { item: TimelineItem; start: number }) {
     case 'step': {
       const limit = item.memory_limit_mb
       tone = item.out_of_memory ? 'bad' : item.exit_code === 0 ? 'step' : 'warn'
-      title = item.out_of_memory
+      const role =
+        item.strategy === 'rewrite' ? `Rewrite ${item.rewrite} · `
+        : item.strategy === 'same code' ? 'Same code again · '
+        : item.strategy === 'bigger sandbox' ? 'In the bigger sandbox · '
+        : ''
+      title = role + (item.out_of_memory
         ? `Code step killed: out of memory at ${Math.round(item.peak_memory_mb ?? 0)} MB of ${limit} MB`
-        : `Code step ${item.exit_code === 0 ? 'done' : `failed (exit ${item.exit_code})`}: ${Math.round(item.peak_memory_mb ?? 0)} MB of ${limit ?? '?'} MB`
+        : `Code step ${item.exit_code === 0 ? 'done' : `failed (exit ${item.exit_code})`}: ${Math.round(item.peak_memory_mb ?? 0)} MB of ${limit ?? '?'} MB`)
       detail = (
         <>
           <code>{item.command}</code>

@@ -40,7 +40,13 @@ export interface LoadStep {
   peak_memory_mb: number | null
   memory_limit_mb: number | null
   out_of_memory: boolean
+  /** What the step was: worked out from the log (backend/api/load.py step_roles). */
+  strategy?: StepStrategy
+  rewrite?: number
 }
+
+/** first try / a changed attempt after a kill / unchanged after a kill / after moving to a bigger sandbox */
+export type StepStrategy = 'first' | 'rewrite' | 'same code' | 'bigger sandbox'
 
 /** A conversation that ran code: what it cost and what happened to its sandbox. */
 export interface LoadConversation {
@@ -54,6 +60,9 @@ export interface LoadConversation {
   out_of_memory: number
   upgrades: number
   upgrade_failures: number
+  rewrites: number
+  /** How an out-of-memory kill ended; null when there was none. */
+  resolved_by: 'rewrite' | 'bigger sandbox' | 'not resolved' | null
   peak_memory_mb: number | null
   sandbox_gb: number | null
   last: string
@@ -74,6 +83,8 @@ export type TimelineItem = { ts: string; turn: number } & (
       peak_memory_mb: number | null
       memory_limit_mb: number | null
       out_of_memory: boolean
+      strategy?: StepStrategy
+      rewrite?: number
     }
   | { kind: 'event'; event: string; [field: string]: unknown }
 )
