@@ -18,6 +18,12 @@ A sandbox can die on its own (the provider stops it, a crash). Before a turn,
 one unused for `check_after_seconds` is checked, and replaced if it does not
 answer: same slot, same memory, new empty sandbox.
 
+A command killed for running out of memory gets a bigger sandbox
+(`bigger_sandbox`, e.g. 4 GB): it is started, the work folder copied over,
+the conversation switched to it, the old one deleted, and the command run
+again. Memory is budgeted in GB (`max_memory_gb`, the provider account's
+limit), so a bigger sandbox is only started when it fits.
+
 If the provider's sandboxes carry a `server` label (api/main.py gives each
 run its own), `start` also deletes sandboxes an earlier run left behind (it
 crashed before deleting them): same labels, another `server`.
@@ -42,8 +48,11 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.checkpoint.memory import InMemorySaver
 
+from pathlib import PurePosixPath
+
 from sandboxes import SandboxProvider
-from sandboxes.lazy import LazySandbox
+from sandboxes.base import copy_work_dir
+from sandboxes.lazy import LazySandbox, Upgrade
 
 logger = logging.getLogger(__name__)
 
@@ -83,6 +92,8 @@ class Conversation:
     """Artifact paths already sent to the client, so each is sent once."""
     account: str = DEFAULT_ACCOUNT
     """Who it belongs to. Only that account can use it."""
+    memory_gb: int = 1
+    """Memory of its sandbox: the provider's default, or more after an upgrade."""
 
 
 class ConversationManager:
@@ -98,6 +109,10 @@ class ConversationManager:
         check_after_seconds: float = 60.0,
         warm_sandboxes: int = 0,
         max_per_account: int | None = None,
+        max_memory_gb: int | None = None,
+        bigger_sandbox: tuple[int, int] | None = None,
+        work_dir: PurePosixPath | None = None,
+        copy_files: Callable[[SandboxBackendProtocol, SandboxBackendProtocol], None] | None = None,
     ) -> None:
         if max_sandboxes is not None and warm_sandboxes > max_sandboxes:
             raise ValueError("warm_sandboxes cannot be more than max_sandboxes")
@@ -112,6 +127,15 @@ class ConversationManager:
         self._waiting = 0
         """New conversations waiting for a slot or a warm sandbox."""
         self._max_per_account = max_per_account
+        self._default_gb = provider.default_memory_gb if provider is not None else 0
+        self._max_memory_gb = max_memory_gb
+        self._memory_used = 0
+        """GB of memory in sandboxes that exist or are starting, warm ones included."""
+        self._bigger = bigger_sandbox
+        """(memory GB, vCPU) for a sandbox that ran out of memory; None: no upgrades."""
+        if copy_files is None and work_dir is not None:
+            copy_files = lambda old, new: copy_work_dir(old, new, work_dir)  # noqa: E731
+        self._copy_files = copy_files
         self._held: Counter[str] = Counter()
         """Slots each account holds (its conversations' sandboxes, started or starting)."""
         self._changed = asyncio.Event()
@@ -167,6 +191,9 @@ class ConversationManager:
             "idle_minutes": self._idle_seconds / 60,
             "max_per_account": self._max_per_account,
             "accounts": self._account_status(),
+            "memory_used_gb": self._memory_used,
+            "max_memory_gb": self._max_memory_gb,
+            "bigger": sum(c.sandbox is not None and c.memory_gb > self._default_gb for c in self._conversations.values()),
         }
 
     def _account_status(self) -> dict[str, dict[str, int]]:
@@ -226,7 +253,9 @@ class ConversationManager:
         if conversation is not None and conversation.account != account:
             raise NotYourConversation(conversation_id)
         if conversation is None:
-            conversation = Conversation(conversation_id, None, None, self._clock(), account=account)
+            conversation = Conversation(
+                conversation_id, None, None, self._clock(), account=account, memory_gb=self._default_gb
+            )
             self._conversations[conversation_id] = conversation
             self._launch(conversation, have_slot=False)
         self.touch(conversation)
@@ -272,7 +301,58 @@ class ConversationManager:
             return
         conversation.sandbox = sandbox
         conversation.sandbox_ok_at = self._clock()
+        lazy.on_out_of_memory = self._upgrader(conversation)
         lazy.ready(sandbox)
+
+    def _upgrader(self, conversation: Conversation) -> Callable[[], Upgrade]:
+        """`upgrade`, callable from the worker thread that ran out of memory."""
+        loop = asyncio.get_running_loop()
+
+        def ask() -> Upgrade:
+            return asyncio.run_coroutine_threadsafe(self.upgrade(conversation), loop).result(timeout=900)
+
+        return ask
+
+    async def upgrade(self, conversation: Conversation) -> Upgrade:
+        """Move the conversation to a bigger sandbox, with its work folder. Why not, if not."""
+        smaller = ("To fit, use less memory: select fewer columns, aggregate earlier, "
+                   "query the file with DuckDB, or sample.")
+        if self._bigger is None or self._provider is None or conversation.sandbox is None:
+            return Upgrade(None, f"No bigger sandbox is available. {smaller}")
+        memory_gb, cpu = self._bigger
+        if conversation.memory_gb >= memory_gb:
+            return Upgrade(None, f"This sandbox already has {conversation.memory_gb} GB, the most available. {smaller}")
+        if self._max_memory_gb is not None and self._memory_used + memory_gb > self._max_memory_gb:
+            return Upgrade(None, (f"No room for a {memory_gb} GB sandbox right now "
+                                  f"({self._memory_used} of {self._max_memory_gb} GB in use). {smaller}"))
+        self._memory_used += memory_gb  # held while both sandboxes exist
+        try:
+            bigger = await asyncio.to_thread(self._provider.create_bigger, memory_gb, cpu)
+        except NotImplementedError:
+            self._memory_used -= memory_gb
+            return Upgrade(None, f"This sandbox provider cannot make bigger sandboxes. {smaller}")
+        except Exception as e:
+            self._memory_used -= memory_gb
+            logger.warning("could not start a bigger sandbox", exc_info=True)
+            return Upgrade(None, f"A bigger sandbox could not be started ({e}). {smaller}")
+        try:
+            await asyncio.to_thread(self._provider.prepare, bigger)
+            if self._copy_files is not None:
+                await asyncio.to_thread(self._copy_files, conversation.sandbox, bigger)
+        except Exception as e:
+            await self._destroy(bigger)
+            self._memory_used -= memory_gb
+            logger.warning("could not move to a bigger sandbox", exc_info=True)
+            return Upgrade(None, f"The work could not be moved to a bigger sandbox ({e}). {smaller}")
+        old, old_gb = conversation.sandbox, conversation.memory_gb
+        conversation.sandbox, conversation.memory_gb = bigger, memory_gb
+        conversation.sandbox_ok_at = self._clock()
+        await self._destroy(old)
+        self._memory_used -= old_gb
+        self._changed.set()
+        logger.info("conversation %s moved to a %d GB sandbox", conversation.id, memory_gb)
+        return Upgrade(bigger, f"Moved to a bigger sandbox ({memory_gb} GB memory, {cpu} vCPU) "
+                               "with the files from the work folder.")
 
     async def _start_in_new_slot(self, account: str) -> SandboxBackendProtocol:
         """A warm sandbox, or a new one in a freed slot. SandboxesBusy if neither comes."""
@@ -320,6 +400,9 @@ class ConversationManager:
         logger.warning("the sandbox of conversation %s stopped answering; starting a new one", conversation.id)
         await self._destroy(conversation.sandbox)
         conversation.sandbox = None
+        if conversation.memory_gb != self._default_gb:  # the replacement is default-sized
+            self._memory_used -= conversation.memory_gb - self._default_gb
+            conversation.memory_gb = self._default_gb
         self._launch(conversation, have_slot=True)  # reuses the dead sandbox's slot
         return True
 
@@ -424,7 +507,7 @@ class ConversationManager:
                         return None
                     if self._held[account] == 0 and await self._reclaim_for(account):
                         continue
-                    reason = f"all {self._max_sandboxes} sandboxes are in use; try again in a minute"
+                    reason = self._full_reason()
                 remaining = deadline - asyncio.get_running_loop().time()
                 self._changed.clear()
                 try:
@@ -433,6 +516,12 @@ class ConversationManager:
                     raise SandboxesBusy(reason) from None
         finally:
             self._waiting -= 1
+
+    def _full_reason(self) -> str:
+        if self._max_sandboxes is not None and self._in_use >= self._max_sandboxes:
+            return f"all {self._max_sandboxes} sandboxes are in use; try again in a minute"
+        return (f"all {self._max_memory_gb} GB of sandbox memory is in use "
+                f"({self._memory_used} GB); try again in a minute")
 
     async def _reclaim_for(self, account: str) -> bool:
         """Close another account's longest-idle sandbox, if one holds two or more. True if closed."""
@@ -499,7 +588,7 @@ class ConversationManager:
             await self._destroy(conversation.sandbox)
         finally:
             conversation.sandbox = None
-            self._free_slot(conversation.account)
+            self._free_slot(conversation.account, gb=conversation.memory_gb)
 
     async def _destroy(self, sandbox: SandboxBackendProtocol) -> None:
         try:
@@ -508,16 +597,21 @@ class ConversationManager:
             logger.exception("could not delete sandbox %s", getattr(sandbox, "id", sandbox))
 
     def _try_take_slot(self) -> bool:
+        """A slot for a default-sized sandbox, if one is free and its memory fits the budget."""
         if self._max_sandboxes is not None and self._in_use >= self._max_sandboxes:
             return False
+        if self._max_memory_gb is not None and self._memory_used + self._default_gb > self._max_memory_gb:
+            return False
         self._in_use += 1
+        self._memory_used += self._default_gb
         return True
 
-    def _free_slot(self, account: str | None, refill: bool = True) -> None:
-        """Give back a slot; `account` is whose it was (None: the warm pool's)."""
+    def _free_slot(self, account: str | None, refill: bool = True, gb: int | None = None) -> None:
+        """Give back a slot; `account` is whose it was (None: the warm pool's), `gb` its memory."""
         if self._provider is None:
             return
         self._in_use -= 1
+        self._memory_used -= self._default_gb if gb is None else gb
         if account is not None:
             self._held[account] -= 1
             if self._held[account] <= 0:

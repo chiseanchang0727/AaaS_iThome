@@ -95,7 +95,7 @@ export function LoadPage() {
       ) : (
         <>
           <Totals summary={load.summary} limit={load.memory_limit_mb} />
-          <MemoryChart steps={load.steps} limit={load.memory_limit_mb} />
+          <MemoryChart steps={load.steps} />
 
           {account === null && load.accounts.length > 1 && (
             <div className="table-scroll">
@@ -143,6 +143,7 @@ export function LoadPage() {
                     <td className="nowrap">{seconds(s.cpu_seconds)}</td>
                     <td className="nowrap">
                       {mb(s.peak_memory_mb)}
+                      {s.memory_limit_mb && <span className="muted"> of {s.memory_limit_mb}</span>}
                       {s.peak_memory_mb !== null && s.memory_limit_mb && (
                         <span className="meter">
                           <span

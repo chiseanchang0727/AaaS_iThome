@@ -25,6 +25,11 @@ class DaytonaOptions(ProviderOptions):
     command_timeout: int = 30 * 60
     """Seconds before a command run with `execute` is abandoned."""
 
+    image: str = "daytonaio/sandbox:0.8.0"
+    """Image for sandboxes created with chosen resources (`create_bigger`):
+    Daytona sizes only sandboxes created from an image, not from a snapshot.
+    The default is the image behind Daytona's default snapshot."""
+
 
 class DaytonaProvider(SandboxProvider):
     name = "daytona"
@@ -49,10 +54,25 @@ class DaytonaProvider(SandboxProvider):
         from langchain_daytona import DaytonaSandbox
 
         params = CreateSandboxFromSnapshotParams(
-            **self.options.model_dump(exclude={"command_timeout"}, exclude_none=True),
+            **self.options.model_dump(exclude={"command_timeout", "image"}, exclude_none=True),
             **({"labels": self.labels} if self.labels else {}),
         )
         sandbox = self._get_client().create(params)
+        backend = DaytonaSandbox(sandbox=sandbox, timeout=self.options.command_timeout)
+        self._sandboxes[backend.id] = sandbox
+        return backend
+
+    def create_bigger(self, memory_gb: int, cpu: int) -> SandboxBackendProtocol:
+        from daytona import CreateSandboxFromImageParams, Resources
+        from langchain_daytona import DaytonaSandbox
+
+        params = CreateSandboxFromImageParams(
+            image=self.options.image,
+            resources=Resources(cpu=cpu, memory=memory_gb),
+            **self.options.model_dump(exclude={"command_timeout", "image", "snapshot"}, exclude_none=True),
+            **({"labels": self.labels} if self.labels else {}),
+        )
+        sandbox = self._get_client().create(params, timeout=600)
         backend = DaytonaSandbox(sandbox=sandbox, timeout=self.options.command_timeout)
         self._sandboxes[backend.id] = sandbox
         return backend

@@ -10,12 +10,17 @@ conversation ended), each call returns that operation's error result, the way
 a sandbox reports a failed command or a missing file. The agent sees the
 reason as a tool result and can still answer from what it already has.
 
+A command killed for running out of memory can be given a bigger sandbox:
+`on_out_of_memory` asks for one (the server starts it and copies the work
+over), the stand-in switches to it, and runs the command again there.
+
 Thread-safe: the agent calls sandbox methods from worker threads.
 """
 
 import asyncio
 import logging
 from collections.abc import Callable
+from dataclasses import dataclass
 from concurrent.futures import Future
 from concurrent.futures import TimeoutError as FutureTimeout
 
@@ -36,6 +41,15 @@ from deepagents.backends.protocol import (
 
 from .metering import StepMeasure, run_measured
 
+
+@dataclass(frozen=True)
+class Upgrade:
+    """The answer to "this ran out of memory": a bigger sandbox, or why not."""
+
+    sandbox: SandboxBackendProtocol | None
+    note: str
+    """What the agent is told, e.g. "moved to a 4 GB sandbox"."""
+
 log = logging.getLogger(__name__)
 
 START_TIMEOUT = 180.0
@@ -55,6 +69,10 @@ class LazySandbox(SandboxBackendProtocol):
         self.on_step: Callable[[StepMeasure], None] | None = None
         """Called with what each command cost (sandboxes/metering.py), from
         the worker thread that ran it. Set per turn by the API."""
+        self.on_out_of_memory: Callable[[], Upgrade] | None = None
+        """Called (from a worker thread) when a command ran out of memory; may
+        return a bigger sandbox to switch to. Set by the conversation manager."""
+        self._replaced: SandboxBackendProtocol | None = None
 
     def ready(self, sandbox: SandboxBackendProtocol) -> None:
         self._future.set_result(sandbox)
@@ -68,6 +86,8 @@ class LazySandbox(SandboxBackendProtocol):
 
     def _real(self) -> SandboxBackendProtocol:
         """The real sandbox, waiting for it if needed; SandboxUnavailable if it won't come."""
+        if self._replaced is not None:
+            return self._replaced
         try:
             return self._future.result(timeout=self._start_timeout)
         except FutureTimeout:
@@ -81,6 +101,8 @@ class LazySandbox(SandboxBackendProtocol):
 
     @property
     def id(self) -> str:
+        if self._replaced is not None:
+            return self._replaced.id
         if self._future.done() and self._future.exception() is None:
             return self._future.result().id
         return "starting"
@@ -93,12 +115,31 @@ class LazySandbox(SandboxBackendProtocol):
         except SandboxUnavailable as e:
             return ExecuteResponse(output=self._why(e), exit_code=1)
         result, measure = run_measured(sandbox, command, timeout)
+        self._record(measure)
+        if not measure.out_of_memory or self.on_out_of_memory is None:
+            return result
+        try:
+            upgrade = self.on_out_of_memory()
+        except Exception:
+            log.warning("could not get a bigger sandbox", exc_info=True)
+            return result
+        if upgrade.sandbox is None:
+            return ExecuteResponse(output=f"{result.output}\n[{upgrade.note}]", exit_code=result.exit_code)
+        self._replaced = upgrade.sandbox
+        retried, measure = run_measured(upgrade.sandbox, command, timeout)
+        self._record(measure)
+        return ExecuteResponse(
+            output=f"[{upgrade.note} The command ran out of memory and was run again there.]\n{retried.output}",
+            exit_code=retried.exit_code,
+            truncated=retried.truncated,
+        )
+
+    def _record(self, measure: StepMeasure) -> None:
         if self.on_step is not None:
             try:
                 self.on_step(measure)
             except Exception:
                 log.warning("could not record a sandbox step", exc_info=True)
-        return result
 
     def ls(self, path: str) -> LsResult:
         try:

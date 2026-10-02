@@ -38,6 +38,10 @@ manager = ConversationManager(
     wait_seconds=cfg.server.sandbox_wait_seconds,
     warm_sandboxes=cfg.server.warm_sandboxes,
     max_per_account=cfg.server.max_sandboxes_per_account,
+    max_memory_gb=cfg.server.max_memory_gb,
+    bigger_sandbox=(cfg.server.bigger_sandbox.memory_gb, cfg.server.bigger_sandbox.cpu)
+    if cfg.server.bigger_sandbox else None,
+    work_dir=cfg.sandbox.data_dir.parent,
 )
 
 history = HistoryStore(cfg.server.history_dir)

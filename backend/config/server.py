@@ -5,6 +5,13 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+class SandboxSize(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_gb: int = Field(ge=1)
+    cpu: int = Field(default=1, ge=1)
+
+
 class ServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -30,6 +37,13 @@ class ServerConfig(BaseModel):
 
     max_sandboxes_per_account: int | None = Field(default=3, ge=1)
     """At most this many sandboxes per account. None: no per-account limit."""
+
+    max_memory_gb: int | None = Field(default=None, ge=1)
+    """Memory of all sandboxes together, in GB: the provider account's limit
+    (Daytona's tier). A bigger sandbox only starts when it fits. None: no budget."""
+
+    bigger_sandbox: "SandboxSize | None" = None
+    """Size to move a conversation to when a command runs out of memory. None: never."""
 
     default_account: str = "test_user"
     """Whose requests without an X-Account header are (there is no login yet)."""

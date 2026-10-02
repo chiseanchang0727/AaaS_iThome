@@ -482,6 +482,7 @@ def test_status_counts_busy_idle_and_starting():
             "busy": 1, "idle": 1, "starting": 1, "warm": 0, "warming": 0, "waiting": 0,
             "idle_minutes": 15.0, "max_per_account": None,
             "accounts": {"test_user": {"sandboxes": 3, "busy": 1, "idle": 1, "starting": 1}},
+            "memory_used_gb": 3, "max_memory_gb": None, "bigger": 0,
         }
         provider.release()
         await starting.starting
@@ -685,5 +686,117 @@ def test_an_account_that_already_has_one_does_not_take_from_others():
         await started_for(m, "b1", "bob")
         second_for_bob = await started_for(m, "b2", "bob")  # bob has one: no guarantee left
         assert second_for_bob.sandbox is None and m.get("a1").sandbox and m.get("a2").sandbox
+
+    run(scenario())
+
+
+# --- memory budget and bigger sandboxes ----------------------------------------------
+
+
+class SizingProvider(GatedProvider):
+    """Also makes bigger sandboxes, which can be made to fail."""
+
+    def __init__(self, fail_bigger=False):
+        super().__init__(open=True)
+        self.fail_bigger, self.bigger = fail_bigger, []
+
+    def create_bigger(self, memory_gb, cpu):
+        if self.fail_bigger:
+            raise RuntimeError("Total memory limit exceeded")
+        sandbox = Sandbox(f"big-{len(self.bigger)}")
+        sandbox.memory_gb, sandbox.cpu = memory_gb, cpu
+        self.bigger.append(sandbox)
+        return sandbox
+
+
+def test_the_memory_budget_limits_how_many_start():
+    async def scenario():
+        m = manager(GatedProvider(open=True), max_memory_gb=2, wait_seconds=0.05)
+        await started(m, "a")
+        await started(m, "b")
+        third = await started(m, "c")
+        assert third.sandbox is None and m.status()["memory_used_gb"] == 2
+        result = await asyncio.to_thread(stand_in(third).execute, "ls")
+        assert "all 2 GB of sandbox memory is in use" in result.output
+
+    run(scenario())
+
+
+def test_an_upgrade_moves_the_work_and_swaps_the_sandbox():
+    async def scenario():
+        copied = []
+        provider = SizingProvider()
+        m = manager(provider, max_memory_gb=10, bigger_sandbox=(4, 2),
+                    copy_files=lambda old, new: copied.append((old.id, new.id)))
+        conversation = await started(m, "x")
+        small = conversation.sandbox
+
+        upgrade = await m.upgrade(conversation)
+        assert upgrade.sandbox is conversation.sandbox and conversation.sandbox.id == "sandbox-big-0"
+        assert (conversation.sandbox.memory_gb, conversation.sandbox.cpu) == (4, 2)
+        assert "4 GB memory, 2 vCPU" in upgrade.note
+        assert copied == [("sandbox-0", "sandbox-big-0")] and provider.destroyed == [small]
+        status = m.status()
+        assert (status["memory_used_gb"], status["in_use"], status["bigger"]) == (4, 1, 1)
+
+        await m.close("x")  # the whole 4 GB comes back
+        assert m.status()["memory_used_gb"] == 0
+
+    run(scenario())
+
+
+def test_an_upgrade_needs_room_in_the_budget():
+    async def scenario():
+        provider = SizingProvider()
+        m = manager(provider, max_memory_gb=4, bigger_sandbox=(4, 2), copy_files=lambda o, n: None)
+        conversation = await started(m, "x")  # 1 GB in use: 1 + 4 does not fit in 4
+        upgrade = await m.upgrade(conversation)
+        assert upgrade.sandbox is None and "No room for a 4 GB sandbox" in upgrade.note
+        assert provider.bigger == [] and m.status()["memory_used_gb"] == 1
+
+    run(scenario())
+
+
+def test_no_second_upgrade_and_none_when_turned_off():
+    async def scenario():
+        m = manager(SizingProvider(), bigger_sandbox=(4, 2), copy_files=lambda o, n: None)
+        conversation = await started(m, "x")
+        await m.upgrade(conversation)
+        again = await m.upgrade(conversation)
+        assert again.sandbox is None and "already has 4 GB" in again.note
+
+        off = manager(SizingProvider())
+        assert "No bigger sandbox is available" in (await off.upgrade(await started(off, "y"))).note
+
+    run(scenario())
+
+
+def test_a_failed_upgrade_keeps_the_old_sandbox_and_the_budget():
+    async def scenario():
+        provider = SizingProvider(fail_bigger=True)
+        m = manager(provider, max_memory_gb=10, bigger_sandbox=(4, 2), copy_files=lambda o, n: None)
+        conversation = await started(m, "x")
+        upgrade = await m.upgrade(conversation)
+        assert upgrade.sandbox is None and "Total memory limit exceeded" in upgrade.note
+        assert conversation.sandbox.id == "sandbox-0" and m.status()["memory_used_gb"] == 1
+
+        def broken_copy(old, new):
+            raise RuntimeError("tar failed")
+
+        provider.fail_bigger = False
+        m._copy_files = broken_copy
+        upgrade = await m.upgrade(conversation)
+        assert "could not be moved" in upgrade.note and provider.destroyed == provider.bigger
+        assert conversation.sandbox.id == "sandbox-0" and m.status()["memory_used_gb"] == 1
+
+    run(scenario())
+
+
+def test_the_stand_in_reaches_the_upgrade_from_its_worker_thread():
+    async def scenario():
+        m = manager(SizingProvider(), bigger_sandbox=(4, 2), copy_files=lambda o, n: None)
+        conversation = await started(m, "x")
+        upgrade = await asyncio.to_thread(stand_in(conversation).on_out_of_memory)
+        assert upgrade.sandbox is conversation.sandbox and conversation.memory_gb == 4
 
     run(scenario())

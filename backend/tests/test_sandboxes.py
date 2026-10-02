@@ -1,6 +1,6 @@
 """Sandbox providers: the ABC, the registry, and Daytona against a fake client."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import daytona
 import pytest
@@ -220,7 +220,7 @@ class FakeDaytona:
         self.created, self.deleted = [], []
         FakeDaytona.instances.append(self)
 
-    def create(self, params):
+    def create(self, params, timeout=None):
         self.created.append(params)
         return FakeRawSandbox(f"sbx-{len(self.created)}")
 
@@ -319,7 +319,7 @@ def test_daytona_session_deletes_on_error(fake_daytona):
 
 def test_daytona_options_reject_unknown_keys():
     with pytest.raises(ValidationError):
-        DaytonaOptions(image="python:3.12")
+        DaytonaOptions(gpu_type="H100")
 
 
 
@@ -362,3 +362,84 @@ def test_daytona_finds_sandboxes_by_label_and_deletes_them(fake_daytona):
 
 def test_a_provider_that_cannot_list_finds_nothing(tmp_path):
     assert LocalProvider(root=tmp_path).find({"app": "a"}) == []
+
+
+
+# --- bigger sandboxes --------------------------------------------------------------
+
+
+def test_daytona_bigger_sandboxes_come_from_an_image_with_resources(fake_daytona):
+    from daytona import CreateSandboxFromImageParams
+
+    provider = DaytonaProvider({"snapshot": "py-data", "auto_stop_interval": 15}, labels={"app": "a"})
+    backend = provider.create_bigger(memory_gb=4, cpu=2)
+    [params] = fake_daytona.instances[0].created
+    assert isinstance(params, CreateSandboxFromImageParams)
+    assert params.image == "daytonaio/sandbox:0.8.0"
+    assert (params.resources.memory, params.resources.cpu) == (4, 2)
+    assert params.auto_stop_interval == 15 and params.labels == {"app": "a"}
+    provider.destroy(backend)
+    assert len(fake_daytona.instances[0].deleted) == 1
+
+
+def test_a_provider_that_cannot_size_says_so():
+    with pytest.raises(NotImplementedError):
+        LocalProvider().create_bigger(4, 2)
+
+
+class Rooted:
+    """A sandbox whose /work and /tmp live in its own folder on this machine."""
+
+    def __init__(self, root):
+        self.root = root
+        (root / "work").mkdir(parents=True, exist_ok=True)
+        (root / "tmp").mkdir(exist_ok=True)
+
+    def _local(self, text):
+        return text.replace("/tmp/", f"{self.root}/tmp/").replace("/work", f"{self.root}/work")
+
+    def execute(self, command, timeout=None):
+        import subprocess
+
+        p = subprocess.run(["bash", "-c", self._local(command)], capture_output=True, text=True)
+        return ExecuteResponse(output=p.stdout + p.stderr, exit_code=p.returncode)
+
+    def download_files(self, paths):
+        from deepagents.backends.protocol import FileDownloadResponse
+        from pathlib import Path
+
+        return [FileDownloadResponse(path=p, content=Path(self._local(p)).read_bytes()) for p in paths]
+
+    def upload_files(self, files):
+        from deepagents.backends.protocol import FileUploadResponse
+        from pathlib import Path
+
+        for path, content in files:
+            Path(self._local(path)).write_bytes(content)
+        return [FileUploadResponse(path=p) for p, _ in files]
+
+
+def test_the_work_folder_is_copied_to_the_new_sandbox(tmp_path):
+    from sandboxes.base import copy_work_dir
+
+    old, new = Rooted(tmp_path / "old"), Rooted(tmp_path / "new")
+    (old.root / "work" / "data").mkdir()
+    (old.root / "work" / "data" / "rows.parquet").write_bytes(b"PAR1 rows")
+    (old.root / "work" / "script.py").write_text("print('hi')")
+    (old.root / "work" / ".cache").mkdir()
+    (old.root / "work" / ".cache" / "big").write_text("skip me")
+
+    copy_work_dir(old, new, PurePosixPath("/work"))
+
+    assert (new.root / "work" / "data" / "rows.parquet").read_bytes() == b"PAR1 rows"
+    assert (new.root / "work" / "script.py").read_text() == "print('hi')"
+    assert not (new.root / "work" / ".cache").exists()
+    assert not (new.root / "tmp" / "aaas-work.tgz").exists()  # cleaned up
+
+
+def test_a_failed_copy_says_what_failed(tmp_path):
+    from sandboxes.base import SandboxSetupError, copy_work_dir
+
+    old, new = Rooted(tmp_path / "old"), Rooted(tmp_path / "new")
+    with pytest.raises(SandboxSetupError, match="could not pack"):
+        copy_work_dir(old, new, PurePosixPath("/missing"))

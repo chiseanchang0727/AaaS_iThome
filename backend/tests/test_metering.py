@@ -98,3 +98,65 @@ def test_out_of_memory_is_named_only_near_the_limit():
     assert "ran out of memory (it reached 972 MB of the sandbox's 1024 MB)" in _killed_note(near)
     assert "most likely" in _killed_note(far)
     assert _killed_note(StepMeasure("x", 143, 1.0, signal=15)) == "[Killed by signal 15.]"
+
+
+# --- out of memory: a bigger sandbox, and the command again -------------------------
+
+
+class Scripted:
+    """A sandbox whose wrapped commands report the given memory, as metering prints it."""
+
+    def __init__(self, id, output, peak, limit, killed=False):
+        self.id, self.output, self.peak, self.limit, self.killed = id, output, peak, limit, killed
+        self.commands = []
+
+    def execute(self, command, timeout=None):
+        import json
+
+        self.commands.append(command)
+        report = {"run_seconds": 0.4, "cpu_seconds": 0.4, "peak_memory_mb": self.peak,
+                  "signal": 9 if self.killed else None, "memory_limit_mb": self.limit}
+        out = ("" if self.killed else self.output) + f"\n{MARKER} {json.dumps(report)}\n"
+        return ExecuteResponse(output=out, exit_code=137 if self.killed else 0)
+
+
+def test_out_of_memory_moves_to_a_bigger_sandbox_and_runs_again():
+    from sandboxes.lazy import Upgrade
+
+    small = Scripted("small", "", 980, 1024, killed=True)
+    big = Scripted("big", "mean: 0.5\n", 1545, 4096)
+    lazy, steps = LazySandbox(), []
+    lazy.on_step = steps.append
+    lazy.on_out_of_memory = lambda: Upgrade(big, "Moved to a bigger sandbox (4 GB memory, 2 vCPU).")
+    lazy.ready(small)
+
+    result = lazy.execute("python3 matrix.py")
+    assert result.exit_code == 0
+    assert result.output.startswith("[Moved to a bigger sandbox (4 GB memory, 2 vCPU). The command ran out of memory")
+    assert "mean: 0.5" in result.output
+    assert [(s.out_of_memory, s.memory_limit_mb) for s in steps] == [(True, 1024), (False, 4096)]
+    assert lazy.id == "big"  # later steps go to the bigger sandbox
+    lazy.execute("ls")
+    assert len(small.commands) == 1 and len(big.commands) == 2
+
+
+def test_without_a_bigger_sandbox_the_agent_is_told_why():
+    from sandboxes.lazy import Upgrade
+
+    small = Scripted("small", "", 980, 1024, killed=True)
+    lazy = LazySandbox()
+    lazy.on_out_of_memory = lambda: Upgrade(None, "No room for a 4 GB sandbox right now.")
+    lazy.ready(small)
+    result = lazy.execute("python3 matrix.py")
+    assert result.exit_code == 137
+    assert "ran out of memory" in result.output and result.output.endswith("[No room for a 4 GB sandbox right now.]")
+    assert lazy.id == "small"
+
+
+def test_other_failures_do_not_ask_for_a_bigger_sandbox():
+    asked = []
+    lazy = LazySandbox()
+    lazy.on_out_of_memory = lambda: asked.append(1)
+    lazy.ready(Scripted("s", "", 50, 1024, killed=True))  # killed, but far from the limit
+    lazy.execute("python3 x.py")
+    assert asked == []

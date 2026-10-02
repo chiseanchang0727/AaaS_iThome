@@ -70,6 +70,15 @@ class SandboxProvider(ABC):
     def destroy(self, sandbox: SandboxBackendProtocol) -> None:
         """Tear down a sandbox from `create`. Must not raise if already gone."""
 
+    default_memory_gb: ClassVar[int] = 1
+    """Memory of a sandbox from `create`, for the server's memory budget."""
+
+    def create_bigger(self, memory_gb: int, cpu: int) -> SandboxBackendProtocol:
+        """Start a sandbox with this much memory and CPU, for work the default
+        size cannot hold. Providers that cannot size sandboxes raise
+        NotImplementedError."""
+        raise NotImplementedError
+
     def find(self, labels: Mapping[str, str]) -> list[FoundSandbox]:
         """Every sandbox at the provider carrying all of `labels`, ours or not.
 
@@ -120,6 +129,34 @@ class SandboxProvider(ABC):
             yield sandbox
         finally:
             self.destroy(sandbox)
+
+
+WORK_ARCHIVE = "/tmp/aaas-work.tgz"
+
+
+def copy_work_dir(old: SandboxBackendProtocol, new: SandboxBackendProtocol, work_dir: PurePosixPath) -> None:
+    """Copy `work_dir` (scripts, exported data, outputs) from one sandbox to another.
+
+    One tar archive, so it is a single download and upload. Caches and
+    user-installed packages are left out: the new sandbox installs its own.
+    """
+    packed = old.execute(
+        f"tar czf {WORK_ARCHIVE} --exclude=./.cache --exclude=./.local -C {shlex.quote(str(work_dir))} ."
+    )
+    if packed.exit_code != 0:
+        raise SandboxSetupError(f"could not pack {work_dir}: {packed.output.strip()[-300:]}")
+    [archive] = old.download_files([WORK_ARCHIVE])
+    if archive.error or archive.content is None:
+        raise SandboxSetupError(f"could not download {WORK_ARCHIVE}: {archive.error}")
+    [uploaded] = new.upload_files([(WORK_ARCHIVE, archive.content)])
+    if uploaded.error:
+        raise SandboxSetupError(f"could not upload {WORK_ARCHIVE}: {uploaded.error}")
+    unpacked = new.execute(
+        f"mkdir -p {shlex.quote(str(work_dir))} && tar xzf {WORK_ARCHIVE} -C {shlex.quote(str(work_dir))}"
+        f" && rm -f {WORK_ARCHIVE}"
+    )
+    if unpacked.exit_code != 0:
+        raise SandboxSetupError(f"could not unpack into {work_dir}: {unpacked.output.strip()[-300:]}")
 
 
 def download_outputs(

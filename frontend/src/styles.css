@@ -138,6 +138,7 @@ button.danger { background: var(--danger); border-color: var(--danger); color: #
 .sandbox-busy b { color: var(--accent); }
 .sandbox-starting b, .sandbox-warming b { color: var(--muted); }
 .sandbox-waiting b { color: var(--danger); }
+.sandbox-bigger b { color: var(--good); }
 .thread-id { font-size: 0.75em; text-align: right; margin: 0; }
 
 /* --- data ------------------------------------------------------------------ */

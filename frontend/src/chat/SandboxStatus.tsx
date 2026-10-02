@@ -64,6 +64,15 @@ export function SandboxStatus({ refreshKey }: { refreshKey: unknown }) {
       >
         {free === null ? `${status.in_use} in use` : `${free} of ${status.max} free`}
       </span>
+      <span className="sandbox-count muted" title="Memory of all sandboxes together, and the account's limit">
+        {status.memory_used_gb}
+        {status.max_memory_gb === null ? ' GB' : ` of ${status.max_memory_gb} GB`}
+      </span>
+      {status.bigger > 0 && (
+        <span className="sandbox-count sandbox-bigger" title="Moved to a bigger sandbox after running out of memory">
+          <b>{status.bigger}</b> bigger
+        </span>
+      )}
       <span
         className="sandbox-count muted"
         title="Sandboxes your account holds. Each account is guaranteed one, even when all are taken."

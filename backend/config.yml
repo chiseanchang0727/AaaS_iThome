@@ -78,6 +78,14 @@ server:
   # Each account is guaranteed a sandbox (one is reclaimed from an account
   # holding several if all are taken), and holds at most this many.
   max_sandboxes_per_account: 3
+  # All sandboxes together may use this much memory: the Daytona account's
+  # limit (its tier). Sandboxes are 1 GB by default.
+  max_memory_gb: 10
+  # A command that runs out of memory is run again in a sandbox this big (the
+  # work folder is copied over). Delete to turn off.
+  bigger_sandbox:
+    memory_gb: 4
+    cpu: 2
   # Requests without an X-Account header belong to this account (no login yet).
   default_account: test_user
   # Kept started and ready, so a new conversation skips the ~12s start. They

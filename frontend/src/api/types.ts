@@ -70,6 +70,10 @@ export interface SandboxStatus {
   accounts: Record<string, { sandboxes: number; busy: number; idle: number; starting: number }>
   /** The account this request was made as. */
   account: string
+  memory_used_gb: number
+  max_memory_gb: number | null
+  /** Sandboxes moved to a bigger size after running out of memory. */
+  bigger: number
 }
 
 export interface Column {
