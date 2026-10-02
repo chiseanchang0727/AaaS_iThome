@@ -46,6 +46,7 @@ export function SandboxStatus({ refreshKey }: { refreshKey: unknown }) {
 
   const shown = PARTS.filter((p) => p.key === 'busy' || p.key === 'idle' || (status[p.key] as number) > 0)
   const free = status.max === null ? null : status.max - status.in_use
+  const mine = status.accounts[status.account]?.sandboxes ?? 0
   return (
     <p className="sandbox-status" aria-label="Sandboxes">
       <span className="muted">Sandboxes ({status.provider})</span>
@@ -62,6 +63,13 @@ export function SandboxStatus({ refreshKey }: { refreshKey: unknown }) {
         }
       >
         {free === null ? `${status.in_use} in use` : `${free} of ${status.max} free`}
+      </span>
+      <span
+        className="sandbox-count muted"
+        title="Sandboxes your account holds. Each account is guaranteed one, even when all are taken."
+      >
+        {status.account}: {mine}
+        {status.max_per_account === null ? '' : ` of ${status.max_per_account}`}
       </span>
     </p>
   )

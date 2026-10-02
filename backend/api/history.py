@@ -85,12 +85,12 @@ class HistoryStore:
                 logger.warning("skipping unreadable line %d of %s", number, path)
         return records
 
-    def start_turn(self, thread_id: str, message: str) -> "TurnLog":
-        """Write the user's message as the first line of a new turn."""
+    def start_turn(self, thread_id: str, message: str, account: str | None = None) -> "TurnLog":
+        """Write the user's message as the first line of a new turn, with whose it is."""
         records = self.read(thread_id)
         turn = max((r.get("turn", 0) for r in records), default=0) + 1
         log = TurnLog(self, thread_id, turn, previous=records[-1].get("id") if records else None)
-        log.write({"role": "user", "content": message})
+        log.write({"role": "user", "content": message, **({"account": account} if account else {})})
         return log
 
     def append(self, thread_id: str, record: dict[str, Any]) -> None:

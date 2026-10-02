@@ -480,7 +480,8 @@ def test_status_counts_busy_idle_and_starting():
         assert s == {
             "enabled": True, "provider": "gated", "max": 5, "in_use": 3,
             "busy": 1, "idle": 1, "starting": 1, "warm": 0, "warming": 0, "waiting": 0,
-            "idle_minutes": 15.0,
+            "idle_minutes": 15.0, "max_per_account": None,
+            "accounts": {"test_user": {"sandboxes": 3, "busy": 1, "idle": 1, "starting": 1}},
         }
         provider.release()
         await starting.starting
@@ -585,5 +586,104 @@ def test_shutdown_waits_for_the_cleanup():
         m.start()
         await m.close_all()
         assert provider.deleted_found == ["crashed"]
+
+    run(scenario())
+
+
+# --- accounts ------------------------------------------------------------------------
+
+
+def test_a_conversation_belongs_to_its_account():
+    async def scenario():
+        from api import NotYourConversation
+
+        m = manager(GatedProvider(open=True))
+        mine = await m.get_or_create("x", "alice")
+        assert mine.account == "alice"
+        with pytest.raises(NotYourConversation):
+            await m.get_or_create("x", "bob")
+        assert (await m.get_or_create("x", "alice")) is mine
+        await mine.starting
+
+    run(scenario())
+
+
+def test_an_account_at_its_limit_waits_for_its_own_sandboxes():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, max_per_account=1, wait_seconds=0.05)
+        first = await m.get_or_create("a1", "alice")
+        await first.starting
+        second = await m.get_or_create("a2", "alice")
+        await second.starting
+        assert first.sandbox is not None and second.sandbox is None
+        result = await asyncio.to_thread(stand_in(second).execute, "ls")
+        assert "this account already uses 1 sandboxes" in result.output
+        bob = await m.get_or_create("b1", "bob")  # other accounts are unaffected
+        await bob.starting
+        assert bob.sandbox is not None
+
+    run(scenario())
+
+
+async def started_for(m, conversation_id, account):
+    conversation = await m.get_or_create(conversation_id, account)
+    await asyncio.wait_for(asyncio.shield(conversation.starting), 2)
+    return conversation
+
+
+def test_an_account_without_a_sandbox_gets_one_from_an_account_with_several():
+    async def scenario():
+        clock, provider = Clock(), GatedProvider(open=True)
+        m = manager(provider, clock=clock, max_sandboxes=2, wait_seconds=0.05)
+        older = await started_for(m, "a1", "alice")
+        clock.now = 10
+        newer = await started_for(m, "a2", "alice")
+        clock.now = 20
+
+        bob = await started_for(m, "b1", "bob")
+        assert bob.sandbox is not None
+        assert m.get("a1") is None and older.sandbox is None  # alice's longest-idle one went
+        assert m.get("a2") is newer and newer.sandbox is not None
+        assert m.status()["accounts"]["alice"]["sandboxes"] == 1
+        assert m.status()["accounts"]["bob"]["sandboxes"] == 1
+
+    run(scenario())
+
+
+def test_nothing_is_taken_from_an_account_with_only_one():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, max_sandboxes=2, wait_seconds=0.05)
+        await started_for(m, "a1", "alice")
+        await started_for(m, "c1", "carol")
+        bob = await started_for(m, "b1", "bob")
+        assert bob.sandbox is None and m.get("a1").sandbox and m.get("c1").sandbox
+
+    run(scenario())
+
+
+def test_a_busy_conversation_is_never_taken():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, max_sandboxes=2, wait_seconds=0.05)
+        a1 = await started_for(m, "a1", "alice")
+        a2 = await started_for(m, "a2", "alice")
+        async with a1.lock, a2.lock:  # both answering
+            bob = await started_for(m, "b1", "bob")
+        assert bob.sandbox is None and a1.sandbox and a2.sandbox
+
+    run(scenario())
+
+
+def test_an_account_that_already_has_one_does_not_take_from_others():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, max_sandboxes=3, wait_seconds=0.05)
+        await started_for(m, "a1", "alice")
+        await started_for(m, "a2", "alice")
+        await started_for(m, "b1", "bob")
+        second_for_bob = await started_for(m, "b2", "bob")  # bob has one: no guarantee left
+        assert second_for_bob.sandbox is None and m.get("a1").sandbox and m.get("a2").sandbox
 
     run(scenario())

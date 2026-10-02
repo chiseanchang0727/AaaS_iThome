@@ -25,6 +25,11 @@ export interface SandboxStatus {
   warming: number
   waiting: number
   idle_minutes: number
+  max_per_account: number | null
+  /** Per account: slots held, and its conversations' sandboxes by state. */
+  accounts: Record<string, { sandboxes: number; busy: number; idle: number; starting: number }>
+  /** The account this request was made as. */
+  account: string
 }
 
 export interface Column {

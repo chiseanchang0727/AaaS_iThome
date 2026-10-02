@@ -1,3 +1,4 @@
+import { accountHeaders } from './account'
 import { SSEParser } from './sse'
 import type {
   ChatEvent,
@@ -50,7 +51,7 @@ export async function streamChat(
 ): Promise<void> {
   const response = await fetch('/api/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...accountHeaders() },
     body: JSON.stringify(threadId ? { message, thread_id: threadId } : { message }),
     signal,
   })
@@ -66,11 +67,11 @@ export async function streamChat(
 }
 
 export async function getSandboxStatus(): Promise<SandboxStatus> {
-  return json(await fetch('/api/sandboxes'))
+  return json(await fetch('/api/sandboxes', { headers: accountHeaders() }))
 }
 
 export async function endConversation(threadId: string): Promise<void> {
-  await fetch(`/api/conversations/${encodeURIComponent(threadId)}`, { method: 'DELETE' })
+  await fetch(`/api/conversations/${encodeURIComponent(threadId)}`, { method: 'DELETE', headers: accountHeaders() })
 }
 
 export async function uploadFile(file: File): Promise<StagedUpload> {

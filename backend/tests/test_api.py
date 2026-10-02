@@ -431,3 +431,38 @@ def test_each_code_step_is_recorded_with_what_it_cost(tmp_path):
     assert step["turn"] == 1 and step["command"] == "python3 -c 'print(1)'"
     assert step["exit_code"] == 0 and step["peak_memory_mb"] > 0
     assert "sandbox_step" not in {type(m).__name__ for m in to_messages(history.read(thread_id))}
+
+
+
+# --- accounts --------------------------------------------------------------------
+
+
+def chat_as(client, account, message="hi", thread_id=None):
+    body = {"message": message} | ({"thread_id": thread_id} if thread_id else {})
+    with client.stream("POST", "/api/chat", json=body, headers={"X-Account": account}) as response:
+        return response.status_code, events_of(response) if response.status_code == 200 else None
+
+
+def test_without_a_header_the_account_is_test_user(tmp_path):
+    history = HistoryStore(tmp_path / "history", clock=lambda: "t")
+    harness = Harness(tmp_path, history=history)
+    with TestClient(harness.app) as client:
+        thread_id = chat(client)[0]["thread_id"]
+        assert client.get("/api/sandboxes").json()["account"] == "test_user"
+    assert history.read(thread_id)[0]["account"] == "test_user"
+
+
+def test_another_account_cannot_use_or_end_a_conversation(tmp_path):
+    harness = Harness(tmp_path)
+    with TestClient(harness.app) as client:
+        status, events = chat_as(client, "alice")
+        thread_id = events[0]["thread_id"]
+        assert chat_as(client, "bob", "let me in", thread_id)[0] == 404
+        assert client.delete(f"/api/conversations/{thread_id}", headers={"X-Account": "bob"}).status_code == 404
+        assert chat_as(client, "alice", "again", thread_id)[0] == 200
+        assert client.delete(f"/api/conversations/{thread_id}", headers={"X-Account": "alice"}).json() == {"closed": True}
+
+
+def test_a_malformed_account_is_rejected(tmp_path):
+    with TestClient(Harness(tmp_path).app) as client:
+        assert chat_as(client, "Bob Smith!")[0] == 400

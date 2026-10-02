@@ -36,6 +36,7 @@ manager = ConversationManager(
     max_sandboxes=cfg.server.max_sandboxes,
     wait_seconds=cfg.server.sandbox_wait_seconds,
     warm_sandboxes=cfg.server.warm_sandboxes,
+    max_per_account=cfg.server.max_sandboxes_per_account,
 )
 
 app = create_app(
@@ -48,4 +49,5 @@ app = create_app(
         evals_router(Path("evals/memory/out/runs")),
     ],
     history=HistoryStore(cfg.server.history_dir),
+    default_account=cfg.server.default_account,
 )

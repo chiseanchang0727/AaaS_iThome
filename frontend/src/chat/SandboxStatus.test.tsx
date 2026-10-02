@@ -7,6 +7,8 @@ import { SandboxStatus } from './SandboxStatus'
 const STATUS = {
   enabled: true, provider: 'daytona', max: 10, in_use: 4,
   busy: 1, idle: 2, starting: 0, warm: 1, warming: 0, waiting: 0, idle_minutes: 15,
+  max_per_account: 3, account: 'test_user',
+  accounts: { test_user: { sandboxes: 2, busy: 1, idle: 1, starting: 0 }, alice: { sandboxes: 1, busy: 0, idle: 1, starting: 0 } },
 }
 
 afterEach(() => vi.unstubAllGlobals())
@@ -21,6 +23,7 @@ describe('SandboxStatus', () => {
     expect(bar).toHaveTextContent('2 idle')
     expect(bar).toHaveTextContent('1 ready')
     expect(bar).toHaveTextContent('6 of 10 free')
+    expect(bar).toHaveTextContent('test_user: 2 of 3')
     expect(bar).not.toHaveTextContent('starting') // zero counts beyond busy/idle are hidden
   })
 

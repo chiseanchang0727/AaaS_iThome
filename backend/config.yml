@@ -75,6 +75,11 @@ server:
   # conversation waits this long for one to be freed, then is refused.
   max_sandboxes: 10
   sandbox_wait_seconds: 30
+  # Each account is guaranteed a sandbox (one is reclaimed from an account
+  # holding several if all are taken), and holds at most this many.
+  max_sandboxes_per_account: 3
+  # Requests without an X-Account header belong to this account (no login yet).
+  default_account: test_user
   # Kept started and ready, so a new conversation skips the ~12s start. They
   # count toward max_sandboxes and are billed while they wait. 0: off.
   warm_sandboxes: 1

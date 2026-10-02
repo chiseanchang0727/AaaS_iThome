@@ -33,6 +33,7 @@ import asyncio
 import logging
 import time
 import uuid
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -46,12 +47,19 @@ from sandboxes.lazy import LazySandbox
 
 logger = logging.getLogger(__name__)
 
+DEFAULT_ACCOUNT = "test_user"
+"""Whose a conversation is when nobody says (there is no login yet)."""
+
 HEALTH_CHECK_TIMEOUT = 15.0
 """Seconds a sandbox gets to answer a health check before it counts as dead."""
 
 
 class SandboxesBusy(RuntimeError):
     """Every sandbox slot stayed taken for the whole wait."""
+
+
+class NotYourConversation(LookupError):
+    """The conversation belongs to another account."""
 
 AgentBuilder = Callable[[SandboxBackendProtocol | None, BaseCheckpointSaver], Any]
 SandboxHook = Callable[[SandboxBackendProtocol], Awaitable[None]]
@@ -73,6 +81,8 @@ class Conversation:
     """What the agent was built on; its `on_step` hears what each code step cost."""
     announced: set[str] = field(default_factory=set)
     """Artifact paths already sent to the client, so each is sent once."""
+    account: str = DEFAULT_ACCOUNT
+    """Who it belongs to. Only that account can use it."""
 
 
 class ConversationManager:
@@ -87,6 +97,7 @@ class ConversationManager:
         wait_seconds: float = 30.0,
         check_after_seconds: float = 60.0,
         warm_sandboxes: int = 0,
+        max_per_account: int | None = None,
     ) -> None:
         if max_sandboxes is not None and warm_sandboxes > max_sandboxes:
             raise ValueError("warm_sandboxes cannot be more than max_sandboxes")
@@ -100,6 +111,9 @@ class ConversationManager:
         """Slots taken: sandboxes that exist or are starting, warm ones included."""
         self._waiting = 0
         """New conversations waiting for a slot or a warm sandbox."""
+        self._max_per_account = max_per_account
+        self._held: Counter[str] = Counter()
+        """Slots each account holds (its conversations' sandboxes, started or starting)."""
         self._changed = asyncio.Event()
         """Set when a slot frees up or a warm sandbox is ready."""
         self._wait_seconds = wait_seconds
@@ -151,7 +165,19 @@ class ConversationManager:
             "warming": self._warming_count(),
             "waiting": self._waiting,
             "idle_minutes": self._idle_seconds / 60,
+            "max_per_account": self._max_per_account,
+            "accounts": self._account_status(),
         }
+
+    def _account_status(self) -> dict[str, dict[str, int]]:
+        accounts: dict[str, dict[str, int]] = {}
+        for c in self._conversations.values():
+            a = accounts.setdefault(c.account, {"sandboxes": self._held[c.account], "busy": 0, "idle": 0, "starting": 0})
+            if c.sandbox is not None:
+                a["busy" if c.lock.locked() else "idle"] += 1
+            elif c.starting is not None and not c.starting.done():
+                a["starting"] += 1
+        return accounts
 
     def start(self) -> None:
         """Delete what a crashed run left behind, and begin filling the warm pool.
@@ -190,14 +216,17 @@ class ConversationManager:
             logger.warning("deleted %d sandbox(es) an earlier run left behind: %s", len(deleted), deleted)
         return deleted
 
-    async def get_or_create(self, conversation_id: str) -> Conversation:
-        """The live conversation with this id, or a new one. Never waits for a sandbox.
+    async def get_or_create(self, conversation_id: str, account: str = DEFAULT_ACCOUNT) -> Conversation:
+        """The live conversation with this id, or a new one for `account`. Never waits for a sandbox.
 
         A new conversation's sandbox starts in the background (`starting`).
+        Raises NotYourConversation if the id is another account's.
         """
         conversation = self._conversations.get(conversation_id)
+        if conversation is not None and conversation.account != account:
+            raise NotYourConversation(conversation_id)
         if conversation is None:
-            conversation = Conversation(conversation_id, None, None, self._clock())
+            conversation = Conversation(conversation_id, None, None, self._clock(), account=account)
             self._conversations[conversation_id] = conversation
             self._launch(conversation, have_slot=False)
         self.touch(conversation)
@@ -226,10 +255,10 @@ class ConversationManager:
                 try:
                     sandbox = await self._start_sandbox()
                 except BaseException:
-                    self._free_slot()
+                    self._free_slot(conversation.account)
                     raise
             else:
-                sandbox = await self._start_in_new_slot()
+                sandbox = await self._start_in_new_slot(conversation.account)
         except BaseException as e:
             logger.warning("no sandbox for conversation %s: %s", conversation.id, e)
             lazy.failed(e if isinstance(e, Exception) else RuntimeError("the start was cancelled"))
@@ -238,23 +267,23 @@ class ConversationManager:
             return
         if self._closing or self._conversations.get(conversation.id) is not conversation:
             await self._destroy(sandbox)  # the conversation ended while it started
-            self._free_slot()
+            self._free_slot(conversation.account)
             lazy.failed(RuntimeError("the conversation ended"))
             return
         conversation.sandbox = sandbox
         conversation.sandbox_ok_at = self._clock()
         lazy.ready(sandbox)
 
-    async def _start_in_new_slot(self) -> SandboxBackendProtocol:
+    async def _start_in_new_slot(self, account: str) -> SandboxBackendProtocol:
         """A warm sandbox, or a new one in a freed slot. SandboxesBusy if neither comes."""
-        warm = await self._obtain()
+        warm = await self._obtain(account)
         try:
             if warm is None:
                 return await self._start_sandbox()
             await self._ready_for_conversation(warm)
             return warm
         except BaseException:
-            self._free_slot()
+            self._free_slot(account)
             raise
         finally:
             self._refill()
@@ -333,7 +362,7 @@ class ConversationManager:
         while self._warm:
             sandbox, _ = self._warm.pop()
             await self._destroy(sandbox)
-            self._free_slot()
+            self._free_slot(None)
 
     async def _start_sandbox(self) -> SandboxBackendProtocol | None:
         """A new sandbox, prepared and with this conversation's files."""
@@ -367,10 +396,14 @@ class ConversationManager:
 
     # --- slots and the warm pool ------------------------------------------------
 
-    async def _obtain(self) -> SandboxBackendProtocol | None:
-        """A warm sandbox, or None after taking a slot to start one in.
+    async def _obtain(self, account: str) -> SandboxBackendProtocol | None:
+        """A warm sandbox, or None after taking a slot to start one in, for `account`.
 
-        Waits up to `wait_seconds` for either, then raises `SandboxesBusy`.
+        An account with no sandbox is guaranteed one: when every slot is taken,
+        the longest-idle sandbox of an account holding two or more is closed
+        for it (that conversation keeps its memory and gets a new sandbox on
+        its next message). An account at `max_per_account` waits for one of
+        its own. Waits up to `wait_seconds`, then raises `SandboxesBusy`.
         """
         if self._provider is None:
             return None
@@ -378,21 +411,42 @@ class ConversationManager:
         self._waiting += 1
         try:
             while True:
-                warm = await self._take_warm()
-                if warm is not None:
-                    return warm
-                if self._try_take_slot():
-                    return None
+                if self._max_per_account is not None and self._held[account] >= self._max_per_account:
+                    reason = (f"this account already uses {self._held[account]} sandboxes, its limit; "
+                              "finish or close a conversation first")
+                else:
+                    warm = await self._take_warm()
+                    if warm is not None:
+                        self._held[account] += 1
+                        return warm
+                    if self._try_take_slot():
+                        self._held[account] += 1
+                        return None
+                    if self._held[account] == 0 and await self._reclaim_for(account):
+                        continue
+                    reason = f"all {self._max_sandboxes} sandboxes are in use; try again in a minute"
                 remaining = deadline - asyncio.get_running_loop().time()
                 self._changed.clear()
                 try:
                     await asyncio.wait_for(self._changed.wait(), max(remaining, 0))
                 except TimeoutError:
-                    raise SandboxesBusy(
-                        f"all {self._max_sandboxes} sandboxes are in use; try again in a minute"
-                    ) from None
+                    raise SandboxesBusy(reason) from None
         finally:
             self._waiting -= 1
+
+    async def _reclaim_for(self, account: str) -> bool:
+        """Close another account's longest-idle sandbox, if one holds two or more. True if closed."""
+        candidates = [
+            c for c in self._conversations.values()
+            if c.account != account and c.sandbox is not None and not c.lock.locked()
+            and self._held[c.account] >= 2
+        ]
+        if not candidates:
+            return False
+        victim = min(candidates, key=lambda c: c.last_used)
+        logger.info("closing %s's idle conversation %s so %s gets a sandbox", victim.account, victim.id, account)
+        await self.close(victim.id)
+        return True
 
     async def _take_warm(self) -> SandboxBackendProtocol | None:
         """The oldest warm sandbox that still answers; dead ones are dropped."""
@@ -402,7 +456,7 @@ class ConversationManager:
                 return sandbox
             logger.warning("a warm sandbox stopped answering; dropping it")
             await self._destroy(sandbox)
-            self._free_slot()
+            self._free_slot(None)
         return None
 
     def _refill(self) -> None:
@@ -429,11 +483,11 @@ class ConversationManager:
             sandbox = await self._start_prepared()
         except Exception:
             logger.warning("could not start a warm sandbox; will retry later", exc_info=True)
-            self._free_slot(refill=False)  # retried by the reaper, not in a tight loop
+            self._free_slot(None, refill=False)  # retried by the reaper, not in a tight loop
             return
         if self._closing:
             await self._destroy(sandbox)
-            self._free_slot()
+            self._free_slot(None)
             return
         self._warm.append((sandbox, self._clock()))
         self._changed.set()
@@ -445,7 +499,7 @@ class ConversationManager:
             await self._destroy(conversation.sandbox)
         finally:
             conversation.sandbox = None
-            self._free_slot()
+            self._free_slot(conversation.account)
 
     async def _destroy(self, sandbox: SandboxBackendProtocol) -> None:
         try:
@@ -459,10 +513,15 @@ class ConversationManager:
         self._in_use += 1
         return True
 
-    def _free_slot(self, refill: bool = True) -> None:
+    def _free_slot(self, account: str | None, refill: bool = True) -> None:
+        """Give back a slot; `account` is whose it was (None: the warm pool's)."""
         if self._provider is None:
             return
         self._in_use -= 1
+        if account is not None:
+            self._held[account] -= 1
+            if self._held[account] <= 0:
+                del self._held[account]
         self._changed.set()
         if refill:
             self._refill()

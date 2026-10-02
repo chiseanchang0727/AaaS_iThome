@@ -28,6 +28,12 @@ class ServerConfig(BaseModel):
     sandbox_wait_seconds: float = Field(default=30, ge=0)
     """How long a new conversation waits for a free sandbox before it is refused."""
 
+    max_sandboxes_per_account: int | None = Field(default=3, ge=1)
+    """At most this many sandboxes per account. None: no per-account limit."""
+
+    default_account: str = "test_user"
+    """Whose requests without an X-Account header are (there is no login yet)."""
+
     warm_sandboxes: int = Field(default=0, ge=0)
     """Sandboxes kept started and prepared ahead of time, so a new conversation
     skips the ~12s start. They count toward max_sandboxes and are billed."""

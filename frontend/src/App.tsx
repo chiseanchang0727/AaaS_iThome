@@ -1,6 +1,7 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router'
 
 import { ChatPage } from './chat/ChatPage'
+import { getAccount } from './api/account'
 import { DataPage } from './data/DataPage'
 import { EvalsPage } from './evals/EvalsPage'
 
@@ -12,6 +13,9 @@ export default function App() {
         <NavLink to="/chat">Chat</NavLink>
         <NavLink to="/data">Data</NavLink>
         <NavLink to="/evals">Evals</NavLink>
+        <span className="account" title="No login yet: requests are sent as this account">
+          {getAccount()}
+        </span>
       </nav>
       <main className="main">
         <Routes>
