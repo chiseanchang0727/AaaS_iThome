@@ -318,12 +318,12 @@ class ConversationManager:
         self._event(conversation, "sandbox_ready", how=how, sandbox=getattr(sandbox, "id", None),
                     memory_gb=conversation.memory_gb, seconds=round(time.monotonic() - started, 2))
 
-    def _upgrader(self, conversation: Conversation) -> Callable[[], Upgrade]:
+    def _upgrader(self, conversation: Conversation) -> Callable[[str], Upgrade]:
         """`upgrade`, callable from the worker thread that ran out of memory."""
         loop = asyncio.get_running_loop()
 
-        def ask() -> Upgrade:
-            return asyncio.run_coroutine_threadsafe(self.upgrade(conversation), loop).result(timeout=900)
+        def ask(reason: str = "") -> Upgrade:
+            return asyncio.run_coroutine_threadsafe(self.upgrade(conversation, reason), loop).result(timeout=900)
 
         return ask
 
@@ -331,7 +331,7 @@ class ConversationManager:
         self._event(conversation, "upgrade_failed", reason=note)
         return Upgrade(None, note)
 
-    async def upgrade(self, conversation: Conversation) -> Upgrade:
+    async def upgrade(self, conversation: Conversation, reason: str = "") -> Upgrade:
         """Move the conversation to a bigger sandbox, with its work folder. Why not, if not."""
         smaller = ("To fit, use less memory: select fewer columns, aggregate earlier, "
                    "query the file with DuckDB, or sample.")
@@ -345,7 +345,7 @@ class ConversationManager:
             return self._upgrade_failed(conversation, (f"No room for a {memory_gb} GB sandbox right now "
                                                        f"({self._memory_used} of {self._max_memory_gb} GB in use). {smaller}"))
         old, old_gb = conversation.sandbox, conversation.memory_gb
-        self._event(conversation, "upgrade_started", from_gb=old_gb, to_gb=memory_gb, cpu=cpu,
+        self._event(conversation, "upgrade_started", from_gb=old_gb, to_gb=memory_gb, cpu=cpu, reason=reason,
                     sandbox=getattr(old, "id", None), memory_used_gb=self._memory_used + memory_gb)
         self._memory_used += memory_gb  # held while both sandboxes exist
         t = time.monotonic()

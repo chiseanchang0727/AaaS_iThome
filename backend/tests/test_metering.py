@@ -120,43 +120,79 @@ class Scripted:
         return ExecuteResponse(output=out, exit_code=137 if self.killed else 0)
 
 
-def test_out_of_memory_moves_to_a_bigger_sandbox_and_runs_again():
+def oom_stand_in(upgrade_to=None, note="Moved to a bigger sandbox (4 GB memory, 2 vCPU)."):
+    """A stand-in on a 1 GB sandbox that is always killed; asking for more gives `upgrade_to`."""
     from sandboxes.lazy import Upgrade
 
     small = Scripted("small", "", 980, 1024, killed=True)
-    big = Scripted("big", "mean: 0.5\n", 1545, 4096)
-    lazy, steps = LazySandbox(), []
+    lazy, steps, asked = LazySandbox(), [], []
     lazy.on_step = steps.append
-    lazy.on_out_of_memory = lambda: Upgrade(big, "Moved to a bigger sandbox (4 GB memory, 2 vCPU).")
+
+    def ask(reason):
+        asked.append(reason)
+        return Upgrade(upgrade_to, note if upgrade_to else "No room for a 4 GB sandbox right now.")
+
+    lazy.on_out_of_memory = ask
     lazy.ready(small)
+    return lazy, small, steps, asked
 
+
+def test_the_first_kill_goes_back_to_the_agent_to_rewrite_or_ask():
+    from sandboxes.lazy import ASK_FIRST
+
+    lazy, small, steps, asked = oom_stand_in(Scripted("big", "ok\n", 1545, 4096))
     result = lazy.execute("python3 matrix.py")
-    assert result.exit_code == 0
-    assert result.output.startswith("[Moved to a bigger sandbox (4 GB memory, 2 vCPU). The command ran out of memory")
-    assert "mean: 0.5" in result.output
-    assert [(s.out_of_memory, s.memory_limit_mb) for s in steps] == [(True, 1024), (False, 4096)]
-    assert lazy.id == "big"  # later steps go to the bigger sandbox
-    lazy.execute("ls")
-    assert len(small.commands) == 1 and len(big.commands) == 2
-
-
-def test_without_a_bigger_sandbox_the_agent_is_told_why():
-    from sandboxes.lazy import Upgrade
-
-    small = Scripted("small", "", 980, 1024, killed=True)
-    lazy = LazySandbox()
-    lazy.on_out_of_memory = lambda: Upgrade(None, "No room for a 4 GB sandbox right now.")
-    lazy.ready(small)
-    result = lazy.execute("python3 matrix.py")
-    assert result.exit_code == 137
-    assert "ran out of memory" in result.output and result.output.endswith("[No room for a 4 GB sandbox right now.]")
+    assert result.exit_code == 137 and asked == []  # no move yet
+    assert "ran out of memory" in result.output and result.output.endswith(f"[{ASK_FIRST}]")
+    assert "request_bigger_sandbox" in ASK_FIRST and "DuckDB" in ASK_FIRST
     assert lazy.id == "small"
+
+
+def test_the_agent_can_ask_for_a_bigger_sandbox_with_a_reason():
+    big = Scripted("big", "mean: 0.5\n", 1545, 4096)
+    lazy, small, steps, asked = oom_stand_in(big)
+    lazy.execute("python3 matrix.py")
+
+    answer = lazy.request_bigger("the task needs the full 3.2 GB matrix in memory at once")
+    assert asked == ["the task needs the full 3.2 GB matrix in memory at once"]
+    assert answer.startswith("Moved to a bigger sandbox") and "Run the command again" in answer
+    result = lazy.execute("python3 matrix.py")  # the agent runs it again
+    assert result.exit_code == 0 and "mean: 0.5" in result.output
+    assert lazy.id == "big" and len(small.commands) == 1 and len(big.commands) == 1
+    assert [(s.out_of_memory, s.memory_limit_mb) for s in steps] == [(True, 1024), (False, 4096)]
+
+
+def test_a_second_kill_of_the_same_command_moves_without_asking():
+    big = Scripted("big", "mean: 0.5\n", 1545, 4096)
+    lazy, small, steps, asked = oom_stand_in(big)
+    lazy.execute("python3 matrix.py")
+    result = lazy.execute("python3 matrix.py")  # re-run without rewriting or asking
+    assert len(asked) == 1 and "ran out of memory again" in asked[0]
+    assert result.exit_code == 0 and result.output.startswith("[It ran out of memory again, so: Moved")
+    assert "mean: 0.5" in result.output and lazy.id == "big"
+
+
+def test_a_different_command_gets_its_own_first_chance():
+    lazy, small, steps, asked = oom_stand_in(Scripted("big", "", 10, 4096))
+    lazy.execute("python3 a.py")
+    lazy.execute("python3 b.py")
+    assert asked == []
+
+
+def test_when_no_bigger_sandbox_is_possible_the_agent_is_told_why():
+    lazy, small, steps, asked = oom_stand_in(upgrade_to=None)
+    assert lazy.request_bigger("needs it") == "No room for a 4 GB sandbox right now."
+    lazy.execute("python3 matrix.py")
+    result = lazy.execute("python3 matrix.py")
+    assert result.exit_code == 137 and result.output.endswith("[No room for a 4 GB sandbox right now.]")
+    assert lazy.id == "small"
+    assert LazySandbox().request_bigger("x") == "No bigger sandbox is available here."
 
 
 def test_other_failures_do_not_ask_for_a_bigger_sandbox():
     asked = []
     lazy = LazySandbox()
-    lazy.on_out_of_memory = lambda: asked.append(1)
+    lazy.on_out_of_memory = lambda reason: asked.append(reason)
     lazy.ready(Scripted("s", "", 50, 1024, killed=True))  # killed, but far from the limit
     lazy.execute("python3 x.py")
     assert asked == []

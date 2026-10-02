@@ -45,7 +45,8 @@ const TIMELINE: ConversationTimeline = {
     { ts: at(4), turn: 1, kind: 'action', tool: 'execute', detail: 'python3 m.py' },
     { ts: at(14), turn: 1, kind: 'step', command: 'python3 m.py', exit_code: 137, seconds: 11, run_seconds: 9.6,
       cpu_seconds: 9.4, peak_memory_mb: 973, memory_limit_mb: 1024, out_of_memory: true },
-    { ts: at(14), turn: 1, kind: 'event', event: 'upgrade_started', from_gb: 1, to_gb: 4, cpu: 2, memory_used_gb: 6 },
+    { ts: at(14), turn: 1, kind: 'event', event: 'upgrade_started', from_gb: 1, to_gb: 4, cpu: 2, memory_used_gb: 6,
+      reason: 'the task needs the full matrix in memory at once' },
     { ts: at(28), turn: 1, kind: 'event', event: 'bigger_created', memory_gb: 4, cpu: 2, seconds: 14 },
     { ts: at(31), turn: 1, kind: 'event', event: 'files_copied', bytes: 40960, seconds: 1.2 },
     { ts: at(31), turn: 1, kind: 'event', event: 'switched', memory_gb: 4 },
@@ -78,7 +79,7 @@ describe('LoadPage', () => {
     // conversations are numbered from the oldest step: bob's (1), then alice's (2)
     await userEvent.click(await screen.findByRole('button', { name: 'Open conversation 2' }))
     expect(await screen.findByRole('region', { name: 'Conversation timeline' })).toHaveTextContent(
-      'Reached the limit: moving to a bigger sandbox, 1 GB → 4 GB',
+      'Moving to a bigger sandbox, 1 GB → 4 GB',
     )
   })
 
@@ -92,7 +93,8 @@ describe('LoadPage', () => {
     for (const text of [
       'Sandbox ready: a warm one was handed over',
       'Code step killed: out of memory at 973 MB of 1024 MB',
-      'Reached the limit: moving to a bigger sandbox, 1 GB → 4 GB',
+      'Moving to a bigger sandbox, 1 GB → 4 GB',
+      'Why: the task needs the full matrix in memory at once',
       'Bigger sandbox created: 4 GB, 2 vCPU',
       'Work folder copied over (40 KB)',
       'Switched to the 4 GB sandbox',

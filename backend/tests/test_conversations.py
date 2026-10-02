@@ -796,8 +796,10 @@ def test_the_stand_in_reaches_the_upgrade_from_its_worker_thread():
     async def scenario():
         m = manager(SizingProvider(), bigger_sandbox=(4, 2), copy_files=lambda o, n: None)
         conversation = await started(m, "x")
-        upgrade = await asyncio.to_thread(stand_in(conversation).on_out_of_memory)
+        heard = listen(conversation)
+        upgrade = await asyncio.to_thread(stand_in(conversation).on_out_of_memory, "needs 3.2 GB at once")
         assert upgrade.sandbox is conversation.sandbox and conversation.memory_gb == 4
+        assert heard[0] == ("upgrade_started", heard[0][1]) and heard[0][1]["reason"] == "needs 3.2 GB at once"
 
     run(scenario())
 

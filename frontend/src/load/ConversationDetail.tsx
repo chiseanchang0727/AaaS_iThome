@@ -27,8 +27,8 @@ function describe(e: EventItem): { tone: string; title: string; detail?: string 
     case 'upgrade_started':
       return {
         tone: 'warn',
-        title: `Reached the limit: moving to a bigger sandbox, ${num(e.from_gb)} GB → ${num(e.to_gb)} GB`,
-        detail: `${num(e.cpu)} vCPU; ${num(e.memory_used_gb)} GB of the budget in use while both exist`,
+        title: `Moving to a bigger sandbox, ${num(e.from_gb)} GB → ${num(e.to_gb)} GB`,
+        detail: `${e.reason ? `Why: ${String(e.reason)}. ` : ''}${num(e.cpu)} vCPU; ${num(e.memory_used_gb)} GB of the budget in use while both exist`,
       }
     case 'bigger_created':
       return { tone: 'move', title: `Bigger sandbox created: ${num(e.memory_gb)} GB, ${num(e.cpu)} vCPU`, detail: secs(e.seconds).trim() }

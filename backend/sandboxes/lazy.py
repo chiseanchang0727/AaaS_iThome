@@ -10,9 +10,13 @@ conversation ended), each call returns that operation's error result, the way
 a sandbox reports a failed command or a missing file. The agent sees the
 reason as a tool result and can still answer from what it already has.
 
-A command killed for running out of memory can be given a bigger sandbox:
-`on_out_of_memory` asks for one (the server starts it and copies the work
-over), the stand-in switches to it, and runs the command again there.
+A command killed for running out of memory first goes back to the agent, with
+advice to use less memory and the option to ask for more: rewriting is
+cheaper than a bigger machine, and only the agent knows whether the work can
+be split. `request_bigger` (the agent's request_bigger_sandbox tool) gets a
+bigger sandbox through `on_out_of_memory`: the server starts it and copies the
+work over, and later commands run there. As a safety net, a command killed a
+second time is moved and run again without asking.
 
 Thread-safe: the agent calls sandbox methods from worker threads.
 """
@@ -52,6 +56,13 @@ class Upgrade:
 
 log = logging.getLogger(__name__)
 
+ASK_FIRST = (
+    "Out of memory in this sandbox. If the work can be done with less memory, change the approach: "
+    "select fewer columns, aggregate earlier, query files with DuckDB, process in chunks or sample. "
+    "If it truly needs this much memory at once, call request_bigger_sandbox with the reason, "
+    "then run the command again."
+)
+
 START_TIMEOUT = 180.0
 """Seconds a call waits for the sandbox: a slot (up to 30s), then the start (~12s)."""
 
@@ -69,10 +80,12 @@ class LazySandbox(SandboxBackendProtocol):
         self.on_step: Callable[[StepMeasure], None] | None = None
         """Called with what each command cost (sandboxes/metering.py), from
         the worker thread that ran it. Set per turn by the API."""
-        self.on_out_of_memory: Callable[[], Upgrade] | None = None
-        """Called (from a worker thread) when a command ran out of memory; may
-        return a bigger sandbox to switch to. Set by the conversation manager."""
+        self.on_out_of_memory: Callable[[str], Upgrade] | None = None
+        """Asks for a bigger sandbox, with the reason; called from a worker
+        thread. Set by the conversation manager once the sandbox is ready."""
         self._replaced: SandboxBackendProtocol | None = None
+        self._killed: dict[str, int] = {}
+        """Out-of-memory kills per command, for the second-kill safety net."""
 
     def ready(self, sandbox: SandboxBackendProtocol) -> None:
         self._future.set_result(sandbox)
@@ -118,21 +131,40 @@ class LazySandbox(SandboxBackendProtocol):
         self._record(measure)
         if not measure.out_of_memory or self.on_out_of_memory is None:
             return result
-        try:
-            upgrade = self.on_out_of_memory()
-        except Exception:
-            log.warning("could not get a bigger sandbox", exc_info=True)
-            return result
+        self._killed[command] = self._killed.get(command, 0) + 1
+        if self._killed[command] == 1:
+            # First time: the agent decides whether to rewrite or ask for more.
+            return ExecuteResponse(output=f"{result.output}\n[{ASK_FIRST}]", exit_code=result.exit_code)
+        upgrade = self._ask(f"the same command ran out of memory again: {command[:200]}")
         if upgrade.sandbox is None:
             return ExecuteResponse(output=f"{result.output}\n[{upgrade.note}]", exit_code=result.exit_code)
-        self._replaced = upgrade.sandbox
         retried, measure = run_measured(upgrade.sandbox, command, timeout)
         self._record(measure)
         return ExecuteResponse(
-            output=f"[{upgrade.note} The command ran out of memory and was run again there.]\n{retried.output}",
+            output=(f"[It ran out of memory again, so: {upgrade.note} The command was run again there.]\n"
+                    f"{retried.output}"),
             exit_code=retried.exit_code,
             truncated=retried.truncated,
         )
+
+    def request_bigger(self, reason: str) -> str:
+        """Move to a bigger sandbox for work that needs more memory. What happened, for the agent."""
+        if self.on_out_of_memory is None:
+            return "No bigger sandbox is available here."
+        upgrade = self._ask(reason)
+        if upgrade.sandbox is None:
+            return upgrade.note
+        return f"{upgrade.note} Run the command again; it now runs there."
+
+    def _ask(self, reason: str) -> Upgrade:
+        try:
+            upgrade = self.on_out_of_memory(reason)
+        except Exception as e:
+            log.warning("could not get a bigger sandbox", exc_info=True)
+            return Upgrade(None, f"A bigger sandbox could not be started ({e}).")
+        if upgrade.sandbox is not None:
+            self._replaced = upgrade.sandbox
+        return upgrade
 
     def _record(self, measure: StepMeasure) -> None:
         if self.on_step is not None:

@@ -20,7 +20,7 @@ from datasets import Registry
 
 from .middleware import SkillEnforcerMiddleware
 from .skill_router import SkillRouterMiddleware, build_classifier
-from .tools import make_export_query, make_list_datasets, query_database
+from .tools import make_export_query, make_list_datasets, make_request_bigger_sandbox, query_database
 
 __all__ = ["build_agent", "SYSTEM_PROMPT", "SANDBOX_PROMPT"]
 
@@ -66,7 +66,10 @@ The sandbox has little memory (about 1 GB), so keep the data you load small:
   file with polars only lazily and only the columns you need:
   `pl.scan_parquet(path).select(...).collect(engine="streaming")`.
 - If a command is killed for running out of memory, do not run the same code
-  again: select fewer columns, aggregate earlier, or switch to DuckDB.
+  again: select fewer columns, aggregate earlier, or switch to DuckDB. Only if
+  the work truly needs that much memory at once (when you have it, the
+  request_bigger_sandbox tool says why it is needed), ask for a bigger sandbox,
+  then run the command again.
 
 Make charts with plotly (plotly.express accepts polars DataFrames) and save
 each as interactive HTML, which the user sees rendered in the chat:
@@ -134,6 +137,8 @@ def build_agent(
         system_prompt += SANDBOX_PROMPT.format(
             data_dir=cfg.sandbox.data_dir, output_dir=cfg.sandbox.output_dir
         )
+        if hasattr(sandbox, "request_bigger"):  # the API's stand-in, which can move sandboxes
+            tools.append(make_request_bigger_sandbox(sandbox))
 
     middleware = []
     if router := skill_router():
