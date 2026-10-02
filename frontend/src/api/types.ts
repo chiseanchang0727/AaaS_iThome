@@ -42,6 +42,47 @@ export interface LoadStep {
   out_of_memory: boolean
 }
 
+/** A conversation that ran code: what it cost and what happened to its sandbox. */
+export interface LoadConversation {
+  conversation: string
+  account: string
+  question: string
+  turns: number
+  steps: number
+  out_of_memory: number
+  upgrades: number
+  upgrade_failures: number
+  peak_memory_mb: number | null
+  sandbox_gb: number | null
+  last: string
+}
+
+/** One moment of a conversation (backend/api/load.py timeline). */
+export type TimelineItem = { ts: string; turn: number } & (
+  | { kind: 'question'; text: string }
+  | { kind: 'action'; tool: string; detail: string }
+  | { kind: 'answer'; text: string }
+  | {
+      kind: 'step'
+      command: string
+      exit_code: number | null
+      seconds: number | null
+      run_seconds: number | null
+      cpu_seconds: number | null
+      peak_memory_mb: number | null
+      memory_limit_mb: number | null
+      out_of_memory: boolean
+    }
+  | { kind: 'event'; event: string; [field: string]: unknown }
+)
+
+/** GET /api/load/conversations/{id}. */
+export interface ConversationTimeline {
+  conversation: string
+  account: string
+  timeline: TimelineItem[]
+}
+
 /** GET /api/load. */
 export interface Load {
   account: string | null
@@ -50,6 +91,7 @@ export interface Load {
   summary: LoadSummary
   per_account: Record<string, LoadSummary>
   steps: LoadStep[]
+  conversations: LoadConversation[]
 }
 
 /** GET /api/sandboxes (ConversationManager.status). */

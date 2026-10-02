@@ -134,8 +134,8 @@ class SandboxProvider(ABC):
 WORK_ARCHIVE = "/tmp/aaas-work.tgz"
 
 
-def copy_work_dir(old: SandboxBackendProtocol, new: SandboxBackendProtocol, work_dir: PurePosixPath) -> None:
-    """Copy `work_dir` (scripts, exported data, outputs) from one sandbox to another.
+def copy_work_dir(old: SandboxBackendProtocol, new: SandboxBackendProtocol, work_dir: PurePosixPath) -> int:
+    """Copy `work_dir` (scripts, exported data, outputs) from one sandbox to another. Bytes moved.
 
     One tar archive, so it is a single download and upload. Caches and
     user-installed packages are left out: the new sandbox installs its own.
@@ -157,6 +157,7 @@ def copy_work_dir(old: SandboxBackendProtocol, new: SandboxBackendProtocol, work
     )
     if unpacked.exit_code != 0:
         raise SandboxSetupError(f"could not unpack into {work_dir}: {unpacked.output.strip()[-300:]}")
+    return len(archive.content)
 
 
 def download_outputs(

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 
 import { getLoad } from '../api/client'
 import type { Load, LoadSummary } from '../api/types'
+import { ConversationDetail } from './ConversationDetail'
 import { MemoryChart } from './MemoryChart'
 
 const POLL_MS = 10_000
@@ -42,6 +43,7 @@ export function LoadPage() {
   const [account, setAccount] = useState<string | null>(null)
   const [load, setLoad] = useState<Load | null>(null)
   const [error, setError] = useState<string | null>(null)
+  const [open, setOpen] = useState<string | null>(null)
 
   useEffect(() => {
     let alive = true
@@ -124,6 +126,41 @@ export function LoadPage() {
             </div>
           )}
 
+          <h2 className="section-title">Conversations</h2>
+          <div className="table-scroll">
+            <table className="turns" aria-label="Conversations">
+              <thead>
+                <tr>
+                  <th>Account</th><th>First question</th><th>Steps</th><th>Out of memory</th>
+                  <th>Moved to bigger</th><th>Peak memory</th><th>Sandbox</th>
+                </tr>
+              </thead>
+              <tbody>
+                {load.conversations.map((c) => (
+                  <tr
+                    key={c.conversation}
+                    className={open === c.conversation ? 'turn open' : 'turn'}
+                    onClick={() => setOpen(open === c.conversation ? null : c.conversation)}
+                    aria-expanded={open === c.conversation}
+                  >
+                    <td>{c.account}</td>
+                    <td className="prompt">{c.question}</td>
+                    <td>{c.steps}</td>
+                    <td className={c.out_of_memory ? 'worse' : ''}>{c.out_of_memory}</td>
+                    <td className={c.upgrades ? 'better' : ''}>
+                      {c.upgrades}
+                      {c.upgrade_failures > 0 && <span className="worse"> ({c.upgrade_failures} failed)</span>}
+                    </td>
+                    <td className="nowrap">{mb(c.peak_memory_mb)}</td>
+                    <td className="nowrap">{c.sandbox_gb === null ? '–' : `${c.sandbox_gb} GB`}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {open && <ConversationDetail key={open} id={open} onClose={() => setOpen(null)} />}
+
+          <h2 className="section-title">Code steps</h2>
           <div className="table-scroll">
             <table className="turns steps-table" aria-label="Code steps">
               <thead>

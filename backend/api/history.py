@@ -6,8 +6,9 @@
     {"id": "5d19…", "previous": "c07e…", "turn": 1, "role": "assistant", "content": "Music has the most views: 4.2M.", "ts": "..."}
 
 A code step run in the sandbox also gets a line with what it cost (role
-`sandbox_step`: command, seconds, cpu_seconds, peak_memory_mb, ...); readers
-that rebuild messages skip it.
+`sandbox_step`: command, seconds, cpu_seconds, peak_memory_mb, ...), and what
+happens to the sandbox gets one too (role `sandbox_event`: ready, moved to a
+bigger one, ...); readers that rebuild messages skip both.
 
 Every line has a unique `id` and the `id` of the line before it, `previous`
 (null on the first line): the order survives without the file, e.g. as rows
@@ -40,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class HistoryStore:
@@ -134,6 +135,10 @@ class TurnLog:
     def record_step(self, measure: Any) -> None:
         """What a code step in the sandbox cost (sandboxes/metering.StepMeasure)."""
         self.write({"role": "sandbox_step", **measure.to_dict()})
+
+    def record_event(self, event: str, fields: dict[str, Any]) -> None:
+        """Something that happened to the conversation's sandbox (api/conversations.py)."""
+        self.write({"role": "sandbox_event", "event": event, **fields})
 
     def record(self, message: BaseMessage) -> None:
         if isinstance(message, AIMessage):

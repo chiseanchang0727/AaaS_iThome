@@ -800,3 +800,62 @@ def test_the_stand_in_reaches_the_upgrade_from_its_worker_thread():
         assert upgrade.sandbox is conversation.sandbox and conversation.memory_gb == 4
 
     run(scenario())
+
+
+# --- sandbox events ------------------------------------------------------------------
+
+
+def listen(conversation):
+    heard = []
+    conversation.on_event = lambda event, fields: heard.append((event, fields))
+    return heard
+
+
+def test_a_move_reports_each_stage_in_order():
+    async def scenario():
+        m = manager(SizingProvider(), max_memory_gb=10, bigger_sandbox=(4, 2), copy_files=lambda old, new: 12345)
+        conversation = await started(m, "x")
+        heard = listen(conversation)
+        await m.upgrade(conversation)
+        assert [e for e, _ in heard] == [
+            "upgrade_started", "bigger_created", "packages_installed", "files_copied", "switched", "old_deleted"]
+        fields = dict(heard)
+        assert (fields["upgrade_started"]["from_gb"], fields["upgrade_started"]["to_gb"]) == (1, 4)
+        assert fields["upgrade_started"]["memory_used_gb"] == 5  # both alive for a moment
+        assert fields["files_copied"]["bytes"] == 12345
+        assert fields["switched"]["sandbox"] == "sandbox-big-0"
+        assert fields["old_deleted"]["memory_used_gb"] == 4
+        assert all("seconds" in fields[e] for e in ("bigger_created", "packages_installed", "files_copied"))
+
+    run(scenario())
+
+
+def test_a_refused_move_reports_why():
+    async def scenario():
+        m = manager(SizingProvider(), max_memory_gb=4, bigger_sandbox=(4, 2), copy_files=lambda o, n: 0)
+        conversation = await started(m, "x")
+        heard = listen(conversation)
+        await m.upgrade(conversation)
+        [(event, fields)] = heard
+        assert event == "upgrade_failed" and "No room for a 4 GB sandbox" in fields["reason"]
+
+    run(scenario())
+
+
+def test_ready_says_whether_the_sandbox_was_warm_or_new():
+    async def scenario():
+        provider = GatedProvider(open=True)
+        m = manager(provider, warm_sandboxes=1)
+        m.start()
+        await warmed(m)
+        heard = {}
+        for name in ("first", "second"):
+            conversation = await m.get_or_create(name)
+            heard[name] = listen(conversation)
+            await conversation.starting
+        await warmed(m)
+        assert heard["first"][0][0] == "sandbox_ready" and heard["first"][0][1]["how"] == "warm"
+        assert heard["second"][0][1]["how"] in ("warm", "new")  # the refill may or may not be ready
+        assert heard["first"][0][1]["memory_gb"] == 1
+
+    run(scenario())

@@ -81,3 +81,41 @@ def test_unmeasured_steps_count_but_add_nothing(tmp_path):
 def test_no_history_yet(tmp_path):
     body = client(HistoryStore(tmp_path / "none")).get("/api/load").json()
     assert body["steps"] == [] and body["summary"]["steps"] == 0 and body["accounts"] == []
+
+
+def test_conversation_rows_count_moves_to_a_bigger_sandbox(tmp_path):
+    history = store(tmp_path)
+    log = history.start_turn("c-big", "the 3.2 GB matrix", "load-test")
+    log.record_event("sandbox_ready", {"how": "warm", "memory_gb": 1})
+    log.record_step(step("python3 m.py", 9.6, 9.4, 973, exit_code=137, signal=9))
+    for event, fields in [("upgrade_started", {"from_gb": 1, "to_gb": 4}), ("bigger_created", {"seconds": 14}),
+                          ("switched", {"memory_gb": 4}), ("old_deleted", {"seconds": 0.5})]:
+        log.record_event(event, fields)
+    log.record_step(StepMeasure("python3 m.py", 0, 36, 34.6, 34.8, 3084, None, 4096))
+    history.start_turn("c-sql", "a plain SQL question", "load-test")  # no code: not listed
+
+    [row] = client(history).get("/api/load").json()["conversations"]
+    assert row["conversation"] == "c-big" and row["question"] == "the 3.2 GB matrix"
+    assert (row["steps"], row["out_of_memory"], row["upgrades"], row["peak_memory_mb"], row["sandbox_gb"]) == (
+        2, 1, 1, 3084, 4)
+
+
+def test_a_conversations_timeline_mixes_actions_steps_and_events(tmp_path):
+    from langchain_core.messages import AIMessage
+
+    history = store(tmp_path)
+    log = history.start_turn("c", "the matrix", "load-test")
+    log.record(AIMessage("", tool_calls=[{"id": "1", "name": "execute", "args": {"command": "python3 m.py"}, "type": "tool_call"}]))
+    log.record_step(step("python3 m.py", 9.6, 9.4, 973, exit_code=137, signal=9))
+    log.record_event("upgrade_started", {"from_gb": 1, "to_gb": 4})
+    log.record(AIMessage("The mean is 0.5."))
+
+    body = client(history).get("/api/load/conversations/c").json()
+    assert body["account"] == "load-test"
+    kinds = [(i["kind"], i.get("tool") or i.get("event")) for i in body["timeline"]]
+    assert kinds == [("question", None), ("action", "execute"), ("step", None), ("event", "upgrade_started"), ("answer", None)]
+    assert body["timeline"][1]["detail"] == "python3 m.py"
+    assert body["timeline"][2]["out_of_memory"] is True
+    assert body["timeline"][3]["to_gb"] == 4
+    assert client(history).get("/api/load/conversations/nope").status_code == 404
+    assert client(history).get("/api/load/conversations/..%2Fx").status_code == 404

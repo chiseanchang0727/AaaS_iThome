@@ -128,10 +128,14 @@ def create_app(
 
         async with conversation.lock:
             try:
-                if await manager.ensure_sandbox(conversation):
-                    yield sse({"type": "notice", "message": SANDBOX_REPLACED})
                 log = history.start_turn(thread_id, message, account) if history is not None else None
                 on_message = log.record if log is not None else None
+                # This turn's log hears sandbox events from here on, including a
+                # replacement below; set the step hook after it, on the stand-in
+                # the agent will actually use.
+                conversation.on_event = log.record_event if log is not None else None
+                if await manager.ensure_sandbox(conversation):
+                    yield sse({"type": "notice", "message": SANDBOX_REPLACED})
                 if conversation.stand_in is not None:
                     conversation.stand_in.on_step = log.record_step if log is not None else None
                 async for event in run_turn(conversation.agent, thread_id, message, on_message):

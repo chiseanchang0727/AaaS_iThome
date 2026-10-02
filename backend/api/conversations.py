@@ -94,6 +94,8 @@ class Conversation:
     """Who it belongs to. Only that account can use it."""
     memory_gb: int = 1
     """Memory of its sandbox: the provider's default, or more after an upgrade."""
+    on_event: Callable[[str, dict[str, Any]], None] | None = None
+    """Hears what happens to its sandbox (ready, moved, ...). Set per turn by the API."""
 
 
 class ConversationManager:
@@ -278,18 +280,28 @@ class ConversationManager:
         self._starts.add(task)
         task.add_done_callback(self._starts.discard)
 
+    def _event(self, conversation: Conversation, event: str, **fields: Any) -> None:
+        if conversation.on_event is None:
+            return
+        try:
+            conversation.on_event(event, fields)
+        except Exception:
+            logger.warning("could not record sandbox event %s", event, exc_info=True)
+
     async def _start_for(self, conversation: Conversation, lazy: LazySandbox, have_slot: bool) -> None:
+        started = time.monotonic()
         try:
             if have_slot:
                 try:
-                    sandbox = await self._start_sandbox()
+                    sandbox, how = await self._start_sandbox(), "replacement"
                 except BaseException:
                     self._free_slot(conversation.account)
                     raise
             else:
-                sandbox = await self._start_in_new_slot(conversation.account)
+                sandbox, how = await self._start_in_new_slot(conversation.account)
         except BaseException as e:
             logger.warning("no sandbox for conversation %s: %s", conversation.id, e)
+            self._event(conversation, "sandbox_unavailable", reason=str(e), seconds=round(time.monotonic() - started, 2))
             lazy.failed(e if isinstance(e, Exception) else RuntimeError("the start was cancelled"))
             if not isinstance(e, Exception):
                 raise
@@ -303,6 +315,8 @@ class ConversationManager:
         conversation.sandbox_ok_at = self._clock()
         lazy.on_out_of_memory = self._upgrader(conversation)
         lazy.ready(sandbox)
+        self._event(conversation, "sandbox_ready", how=how, sandbox=getattr(sandbox, "id", None),
+                    memory_gb=conversation.memory_gb, seconds=round(time.monotonic() - started, 2))
 
     def _upgrader(self, conversation: Conversation) -> Callable[[], Upgrade]:
         """`upgrade`, callable from the worker thread that ran out of memory."""
@@ -313,6 +327,10 @@ class ConversationManager:
 
         return ask
 
+    def _upgrade_failed(self, conversation: Conversation, note: str) -> Upgrade:
+        self._event(conversation, "upgrade_failed", reason=note)
+        return Upgrade(None, note)
+
     async def upgrade(self, conversation: Conversation) -> Upgrade:
         """Move the conversation to a bigger sandbox, with its work folder. Why not, if not."""
         smaller = ("To fit, use less memory: select fewer columns, aggregate earlier, "
@@ -321,47 +339,63 @@ class ConversationManager:
             return Upgrade(None, f"No bigger sandbox is available. {smaller}")
         memory_gb, cpu = self._bigger
         if conversation.memory_gb >= memory_gb:
-            return Upgrade(None, f"This sandbox already has {conversation.memory_gb} GB, the most available. {smaller}")
+            return self._upgrade_failed(
+                conversation, f"This sandbox already has {conversation.memory_gb} GB, the most available. {smaller}")
         if self._max_memory_gb is not None and self._memory_used + memory_gb > self._max_memory_gb:
-            return Upgrade(None, (f"No room for a {memory_gb} GB sandbox right now "
-                                  f"({self._memory_used} of {self._max_memory_gb} GB in use). {smaller}"))
+            return self._upgrade_failed(conversation, (f"No room for a {memory_gb} GB sandbox right now "
+                                                       f"({self._memory_used} of {self._max_memory_gb} GB in use). {smaller}"))
+        old, old_gb = conversation.sandbox, conversation.memory_gb
+        self._event(conversation, "upgrade_started", from_gb=old_gb, to_gb=memory_gb, cpu=cpu,
+                    sandbox=getattr(old, "id", None), memory_used_gb=self._memory_used + memory_gb)
         self._memory_used += memory_gb  # held while both sandboxes exist
+        t = time.monotonic()
         try:
             bigger = await asyncio.to_thread(self._provider.create_bigger, memory_gb, cpu)
         except NotImplementedError:
             self._memory_used -= memory_gb
-            return Upgrade(None, f"This sandbox provider cannot make bigger sandboxes. {smaller}")
+            return self._upgrade_failed(conversation, f"This sandbox provider cannot make bigger sandboxes. {smaller}")
         except Exception as e:
             self._memory_used -= memory_gb
             logger.warning("could not start a bigger sandbox", exc_info=True)
-            return Upgrade(None, f"A bigger sandbox could not be started ({e}). {smaller}")
+            return self._upgrade_failed(conversation, f"A bigger sandbox could not be started ({e}). {smaller}")
+        self._event(conversation, "bigger_created", sandbox=getattr(bigger, "id", None), memory_gb=memory_gb,
+                    cpu=cpu, seconds=round(time.monotonic() - t, 2))
         try:
+            t = time.monotonic()
             await asyncio.to_thread(self._provider.prepare, bigger)
+            self._event(conversation, "packages_installed", packages=list(self._provider.packages),
+                        seconds=round(time.monotonic() - t, 2))
             if self._copy_files is not None:
-                await asyncio.to_thread(self._copy_files, conversation.sandbox, bigger)
+                t = time.monotonic()
+                moved = await asyncio.to_thread(self._copy_files, conversation.sandbox, bigger)
+                self._event(conversation, "files_copied", bytes=moved if isinstance(moved, int) else None,
+                            seconds=round(time.monotonic() - t, 2))
         except Exception as e:
             await self._destroy(bigger)
             self._memory_used -= memory_gb
             logger.warning("could not move to a bigger sandbox", exc_info=True)
-            return Upgrade(None, f"The work could not be moved to a bigger sandbox ({e}). {smaller}")
-        old, old_gb = conversation.sandbox, conversation.memory_gb
+            return self._upgrade_failed(conversation, f"The work could not be moved to a bigger sandbox ({e}). {smaller}")
         conversation.sandbox, conversation.memory_gb = bigger, memory_gb
         conversation.sandbox_ok_at = self._clock()
+        self._event(conversation, "switched", sandbox=getattr(bigger, "id", None), memory_gb=memory_gb)
+        t = time.monotonic()
         await self._destroy(old)
         self._memory_used -= old_gb
         self._changed.set()
+        self._event(conversation, "old_deleted", sandbox=getattr(old, "id", None), memory_gb=old_gb,
+                    seconds=round(time.monotonic() - t, 2), memory_used_gb=self._memory_used)
         logger.info("conversation %s moved to a %d GB sandbox", conversation.id, memory_gb)
         return Upgrade(bigger, f"Moved to a bigger sandbox ({memory_gb} GB memory, {cpu} vCPU) "
                                "with the files from the work folder.")
 
-    async def _start_in_new_slot(self, account: str) -> SandboxBackendProtocol:
-        """A warm sandbox, or a new one in a freed slot. SandboxesBusy if neither comes."""
+    async def _start_in_new_slot(self, account: str) -> tuple[SandboxBackendProtocol, str]:
+        """A warm sandbox, or a new one in a freed slot, and which. SandboxesBusy if neither comes."""
         warm = await self._obtain(account)
         try:
             if warm is None:
-                return await self._start_sandbox()
+                return await self._start_sandbox(), "new"
             await self._ready_for_conversation(warm)
-            return warm
+            return warm, "warm"
         except BaseException:
             self._free_slot(account)
             raise
@@ -398,6 +432,7 @@ class ConversationManager:
             return False
 
         logger.warning("the sandbox of conversation %s stopped answering; starting a new one", conversation.id)
+        self._event(conversation, "sandbox_dead", sandbox=getattr(conversation.sandbox, "id", None))
         await self._destroy(conversation.sandbox)
         conversation.sandbox = None
         if conversation.memory_gb != self._default_gb:  # the replacement is default-sized

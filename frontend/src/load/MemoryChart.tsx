@@ -12,11 +12,12 @@ export function MemoryChart({ steps }: { steps: LoadStep[] }) {
   const measured = [...steps].reverse().filter((s) => s.peak_memory_mb !== null)
   if (measured.length === 0) return null
   const highest = Math.max(...measured.map((s) => Math.max(s.peak_memory_mb!, s.memory_limit_mb ?? 0)))
-  // Scale in steps of 256 MB, with room above the highest limit.
-  const top = Math.ceil((highest * 1.05) / 256) * 256
+  // Round ticks: every 256 MB for small sandboxes, every 1 GB above 2 GB.
+  const tickStep = highest * 1.05 > 2048 ? 1024 : 256
+  const top = Math.ceil((highest * 1.05) / tickStep) * tickStep
   const y = (mb: number) => H - PAD.bottom - (mb / top) * (H - PAD.top - PAD.bottom)
   const slot = (W - PAD.left - PAD.right) / measured.length
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map((f) => Math.round(f * top))
+  const ticks = Array.from({ length: top / tickStep + 1 }, (_, i) => i * tickStep)
 
   return (
     <figure className="chart">
@@ -25,7 +26,7 @@ export function MemoryChart({ steps }: { steps: LoadStep[] }) {
           <g key={t}>
             <line x1={PAD.left} x2={W - PAD.right} y1={y(t)} y2={y(t)} className="grid" />
             <text x={PAD.left - 6} y={y(t)} className="tick" textAnchor="end" dominantBaseline="middle">
-              {t} MB
+              {t >= 1024 && t % 1024 === 0 ? `${t / 1024} GB` : `${t} MB`}
             </text>
           </g>
         ))}

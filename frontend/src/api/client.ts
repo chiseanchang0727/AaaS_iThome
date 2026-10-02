@@ -7,6 +7,7 @@ import type {
   EvalRun,
   EvalRunInfo,
   HistoryLine,
+  ConversationTimeline,
   Load,
   SandboxStatus,
   StagedUpload,
@@ -73,6 +74,10 @@ export async function getSandboxStatus(): Promise<SandboxStatus> {
 
 export async function getLoad(account: string | null): Promise<Load> {
   return json(await fetch(account ? `/api/load?account=${encodeURIComponent(account)}` : '/api/load'))
+}
+
+export async function getConversationTimeline(id: string): Promise<ConversationTimeline> {
+  return json(await fetch(`/api/load/conversations/${encodeURIComponent(id)}`))
 }
 
 export async function endConversation(threadId: string): Promise<void> {
