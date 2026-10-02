@@ -177,3 +177,12 @@ def test_no_kill_means_nothing_to_resolve_and_a_failed_end_is_not_resolved(tmp_p
     for thread, expected in (("ok", None), ("bad", "not resolved")):
         records = history.read(thread)
         assert resolution(records, step_roles(records)) == expected
+
+
+
+def test_a_conversation_is_named_by_the_question_that_ran_code(tmp_path):
+    history = store(tmp_path)
+    history.start_turn("c", "hi, a big file is coming", "alice")          # small talk, no code
+    history.start_turn("c", "median per device with polars", "alice").record_step(step("python3 m.py", 1, 1, 200))
+    [row] = client(history).get("/api/load").json()["conversations"]
+    assert row["question"] == "median per device with polars"

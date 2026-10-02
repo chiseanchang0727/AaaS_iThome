@@ -89,7 +89,7 @@ def conversation_rows(history: HistoryStore) -> list[dict[str, Any]]:
         rows.append({
             "conversation": thread_id,
             "account": _account(records),
-            "question": next((r["content"][:200] for r in records if r.get("role") == "user"), ""),
+            "question": _code_question(records),
             "turns": len({r.get("turn") for r in records if r.get("role") == "user"}),
             "steps": len(steps),
             "run_seconds": round(sum(r.get("run_seconds") or 0 for r in steps), 2),
@@ -105,6 +105,14 @@ def conversation_rows(history: HistoryStore) -> list[dict[str, Any]]:
         })
     rows.sort(key=lambda r: r["last"], reverse=True)
     return rows
+
+
+def _code_question(records: list[dict[str, Any]]) -> str:
+    """The first question whose turn ran code (what the chart labels it with); else the first question."""
+    questions = {r.get("turn"): r["content"] for r in records if r.get("role") == "user"}
+    coded = next((r.get("turn") for r in records if r.get("role") == "sandbox_step"), None)
+    text = questions.get(coded) or next(iter(questions.values()), "")
+    return text[:200]
 
 
 def _near_limit(r: dict[str, Any]) -> bool:

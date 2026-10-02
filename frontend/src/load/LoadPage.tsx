@@ -152,7 +152,7 @@ export function LoadPage() {
             <table className="turns conversations-table" aria-label="Conversations">
               <thead>
                 <tr>
-                  <th>#</th><th>Account</th><th>First question</th><th>Steps</th><th>Run</th><th>CPU</th>
+                  <th>#</th><th>Account</th><th>Question</th><th>Steps</th><th>Run</th><th>CPU</th>
                   <th>Peak memory</th><th>Out of memory</th><th>Rewrites</th><th>Moved to bigger</th>
                   <th>Resolved by</th><th>Sandbox</th>
                 </tr>
