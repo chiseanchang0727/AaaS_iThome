@@ -41,6 +41,8 @@ def conversation_rows(history: HistoryStore) -> list[dict[str, Any]]:
             "question": next((r["content"][:200] for r in records if r.get("role") == "user"), ""),
             "turns": len({r.get("turn") for r in records if r.get("role") == "user"}),
             "steps": len(steps),
+            "run_seconds": round(sum(r.get("run_seconds") or 0 for r in steps), 2),
+            "cpu_seconds": round(sum(r.get("cpu_seconds") or 0 for r in steps), 2),
             "out_of_memory": sum(r.get("signal") == 9 and _near_limit(r) for r in steps),
             "upgrades": sum(r.get("event") == "switched" for r in events),
             "upgrade_failures": sum(r.get("event") == "upgrade_failed" for r in events),

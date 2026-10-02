@@ -98,6 +98,7 @@ def test_conversation_rows_count_moves_to_a_bigger_sandbox(tmp_path):
     assert row["conversation"] == "c-big" and row["question"] == "the 3.2 GB matrix"
     assert (row["steps"], row["out_of_memory"], row["upgrades"], row["peak_memory_mb"], row["sandbox_gb"]) == (
         2, 1, 1, 3084, 4)
+    assert (row["run_seconds"], row["cpu_seconds"]) == (44.2, 44.2)
 
 
 def test_a_conversations_timeline_mixes_actions_steps_and_events(tmp_path):

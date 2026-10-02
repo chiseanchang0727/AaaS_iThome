@@ -8,7 +8,16 @@ const PAD = { left: 52, right: 12, top: 14, bottom: 20 }
  * Peak memory of each step, oldest left. Each bar's dashed cap is that step's
  * own memory limit: it rises when a conversation moved to a bigger sandbox.
  */
-export function MemoryChart({ steps }: { steps: LoadStep[] }) {
+export function MemoryChart({
+  steps,
+  selected = null,
+  onSelect,
+}: {
+  steps: LoadStep[]
+  /** The open conversation: its bars stand out, the others fade. */
+  selected?: string | null
+  onSelect?: (conversation: string) => void
+}) {
   const measured = [...steps].reverse().filter((s) => s.peak_memory_mb !== null)
   if (measured.length === 0) return null
   const highest = Math.max(...measured.map((s) => Math.max(s.peak_memory_mb!, s.memory_limit_mb ?? 0)))
@@ -34,7 +43,13 @@ export function MemoryChart({ steps }: { steps: LoadStep[] }) {
           const x = PAD.left + i * slot + slot * 0.15
           const width = Math.max(slot * 0.7, 1)
           return (
-            <g key={`${s.conversation}-${s.ts}-${i}`}>
+            <g
+              key={`${s.conversation}-${s.ts}-${i}`}
+              className={selected === null ? 'bar-group' : selected === s.conversation ? 'bar-group bar-selected' : 'bar-group bar-faded'}
+              onClick={() => onSelect?.(s.conversation)}
+              role={onSelect ? 'button' : undefined}
+              aria-label={onSelect ? `Open the conversation of a ${Math.round(s.peak_memory_mb!)} MB step` : undefined}
+            >
               <rect
                 x={x}
                 width={width}
@@ -53,8 +68,8 @@ export function MemoryChart({ steps }: { steps: LoadStep[] }) {
       </svg>
       <figcaption>
         <span className="muted">
-          peak memory of each code step, oldest left; dashed: that step's sandbox memory limit; red: killed for
-          running out of memory
+          each bar is one code step, oldest left; height: its peak memory; dashed: its sandbox's memory limit;
+          red: killed for running out of memory. Click a bar to open its conversation.
         </span>
       </figcaption>
     </figure>

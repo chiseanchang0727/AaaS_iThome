@@ -49,6 +49,8 @@ export interface LoadConversation {
   question: string
   turns: number
   steps: number
+  run_seconds: number
+  cpu_seconds: number
   out_of_memory: number
   upgrades: number
   upgrade_failures: number

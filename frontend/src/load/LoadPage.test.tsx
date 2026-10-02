@@ -26,11 +26,12 @@ const LOAD: Load = {
     bob: { ...SUMMARY, steps: 1, peak_memory_mb: 144, out_of_memory: 0 },
   },
   steps: [
-    step('alice', 'python3 big.py', 973, { exit_code: 137, out_of_memory: true }),
+    step('alice', 'python3 big.py', 973, { exit_code: 137, out_of_memory: true, conversation: 'c-alice' }),
     step('bob', 'python3 duck.py', 144),
   ],
   conversations: [{
     conversation: 'c-alice', account: 'alice', question: 'the 3.2 GB matrix', turns: 1, steps: 2,
+    run_seconds: 44.2, cpu_seconds: 44.2,
     out_of_memory: 1, upgrades: 1, upgrade_failures: 0, peak_memory_mb: 3084, sandbox_gb: 4, last: '2026-10-02T10:01:00Z',
   }],
 }
@@ -58,20 +59,26 @@ const TIMELINE: ConversationTimeline = {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('LoadPage', () => {
-  it('shows totals, a memory chart and every step', async () => {
+  it('shows totals, the memory chart and each conversation with its statistics', async () => {
     mockFetch(() => jsonResponse(LOAD))
     render(<LoadPage />)
     expect(await screen.findByText('Code steps', { selector: '.card-label' })).toBeInTheDocument()
     expect(screen.getByText('Peak memory', { selector: '.card-label' }).parentElement).toHaveTextContent('973 MB')
     expect(screen.getByRole('img', { name: 'Peak memory per step' })).toBeInTheDocument()
 
-    const steps = screen.getByRole('table', { name: 'Code steps' })
-    const big = within(steps).getByRole('row', { name: /alice's question/ })
-    expect(big).toHaveTextContent('out of memory')
-    expect(within(steps).getByRole('row', { name: /bob's question/ })).toHaveTextContent('ok')
-    expect(within(steps).queryByText('python3 big.py')).toBeNull() // commands are in the timeline, not here
-    expect(within(steps).queryByRole('columnheader', { name: 'When' })).toBeNull()
-    expect(screen.getByRole('table', { name: 'Per account' })).toHaveTextContent('bob')
+    const row = within(screen.getByRole('table', { name: 'Conversations' })).getByRole('row', { name: /the 3.2 GB matrix/ })
+    for (const text of ['alice', '44.2s', '3084 MB', '4 GB']) expect(row).toHaveTextContent(text)
+    expect(screen.queryByRole('table', { name: 'Code steps' })).toBeNull() // steps live in each conversation
+    expect(screen.queryByRole('region', { name: 'Conversation timeline' })).toBeNull() // closed by default
+  })
+
+  it('a bar in the chart opens its conversation', async () => {
+    mockFetch((call) => jsonResponse(call.url.startsWith('/api/load/conversations/') ? TIMELINE : LOAD))
+    render(<LoadPage />)
+    await userEvent.click(await screen.findByRole('button', { name: 'Open the conversation of a 973 MB step' }))
+    expect(await screen.findByRole('region', { name: 'Conversation timeline' })).toHaveTextContent(
+      'Reached the limit: moving to a bigger sandbox, 1 GB → 4 GB',
+    )
   })
 
   it('opens a conversation to show how its sandbox reached the limit and moved', async () => {

@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { Fragment, useEffect, useState } from 'react'
 
 import { getLoad } from '../api/client'
 import type { Load, LoadSummary } from '../api/types'
@@ -44,6 +44,14 @@ export function LoadPage() {
   const [load, setLoad] = useState<Load | null>(null)
   const [error, setError] = useState<string | null>(null)
   const [open, setOpen] = useState<string | null>(null)
+
+  /** A bar was clicked: open its conversation and bring its row into view. */
+  const openFromChart = (conversation: string) => {
+    setOpen(conversation)
+    requestAnimationFrame(() =>
+      document.getElementById(`conversation-${conversation}`)?.scrollIntoView?.({ behavior: 'smooth', block: 'start' }),
+    )
+  }
 
   useEffect(() => {
     let alive = true
@@ -97,7 +105,7 @@ export function LoadPage() {
       ) : (
         <>
           <Totals summary={load.summary} limit={load.memory_limit_mb} />
-          <MemoryChart steps={load.steps} />
+          <MemoryChart steps={load.steps} selected={open} onSelect={openFromChart} />
 
           {account === null && load.accounts.length > 1 && (
             <div className="table-scroll">
@@ -127,77 +135,48 @@ export function LoadPage() {
           )}
 
           <h2 className="section-title">Conversations</h2>
+          <p className="muted section-hint">
+            Click a conversation, or one of its bars in the chart, to see what happened: each code step, and when
+            it reached the sandbox's limit, the move to a bigger sandbox.
+          </p>
           <div className="table-scroll">
-            <table className="turns" aria-label="Conversations">
+            <table className="turns conversations-table" aria-label="Conversations">
               <thead>
                 <tr>
-                  <th>Account</th><th>First question</th><th>Steps</th><th>Out of memory</th>
-                  <th>Moved to bigger</th><th>Peak memory</th><th>Sandbox</th>
+                  <th>Account</th><th>First question</th><th>Steps</th><th>Run</th><th>CPU</th>
+                  <th>Peak memory</th><th>Out of memory</th><th>Moved to bigger</th><th>Sandbox</th>
                 </tr>
               </thead>
               <tbody>
                 {load.conversations.map((c) => (
-                  <tr
-                    key={c.conversation}
-                    className={open === c.conversation ? 'turn open' : 'turn'}
-                    onClick={() => setOpen(open === c.conversation ? null : c.conversation)}
-                    aria-expanded={open === c.conversation}
-                  >
-                    <td>{c.account}</td>
-                    <td className="prompt">{c.question}</td>
-                    <td>{c.steps}</td>
-                    <td className={c.out_of_memory ? 'worse' : ''}>{c.out_of_memory}</td>
-                    <td className={c.upgrades ? 'better' : ''}>
-                      {c.upgrades}
-                      {c.upgrade_failures > 0 && <span className="worse"> ({c.upgrade_failures} failed)</span>}
-                    </td>
-                    <td className="nowrap">{mb(c.peak_memory_mb)}</td>
-                    <td className="nowrap">{c.sandbox_gb === null ? '–' : `${c.sandbox_gb} GB`}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-          {open && <ConversationDetail key={open} id={open} onClose={() => setOpen(null)} />}
-
-          <h2 className="section-title">Code steps</h2>
-          <div className="table-scroll">
-            <table className="turns steps-table" aria-label="Code steps">
-              <thead>
-                <tr>
-                  <th>Account</th><th>Question</th>
-                  <th>Run</th><th>CPU</th><th>Peak memory</th><th>Result</th>
-                </tr>
-              </thead>
-              <tbody>
-                {load.steps.map((s, i) => (
-                  <tr key={`${s.conversation}-${s.ts}-${i}`}>
-                    <td>{s.account}</td>
-                    <td className="prompt" title={`conversation ${s.conversation}, turn ${s.turn}`}>{s.prompt}</td>
-                    <td className="nowrap">{seconds(s.run_seconds)}</td>
-                    <td className="nowrap">{seconds(s.cpu_seconds)}</td>
-                    <td className="nowrap">
-                      {mb(s.peak_memory_mb)}
-                      {s.memory_limit_mb && <span className="muted"> of {s.memory_limit_mb}</span>}
-                      {s.peak_memory_mb !== null && s.memory_limit_mb && (
-                        <span className="meter">
-                          <span
-                            className={s.out_of_memory ? 'meter-fill meter-oom' : 'meter-fill'}
-                            style={{ width: `${Math.min(100, (100 * s.peak_memory_mb) / s.memory_limit_mb)}%` }}
-                          />
-                        </span>
-                      )}
-                    </td>
-                    <td className="nowrap">
-                      {s.out_of_memory ? (
-                        <span className="verdict bad">out of memory</span>
-                      ) : s.exit_code === 0 ? (
-                        <span className="verdict ok">ok</span>
-                      ) : (
-                        <span className="verdict bad">exit {s.exit_code}</span>
-                      )}
-                    </td>
-                  </tr>
+                  <Fragment key={c.conversation}>
+                    <tr
+                      id={`conversation-${c.conversation}`}
+                      className={open === c.conversation ? 'turn open' : 'turn'}
+                      onClick={() => setOpen(open === c.conversation ? null : c.conversation)}
+                      aria-expanded={open === c.conversation}
+                    >
+                      <td>{c.account}</td>
+                      <td className="prompt">{c.question}</td>
+                      <td>{c.steps}</td>
+                      <td className="nowrap">{seconds(c.run_seconds)}</td>
+                      <td className="nowrap">{seconds(c.cpu_seconds)}</td>
+                      <td className="nowrap">{mb(c.peak_memory_mb)}</td>
+                      <td className={c.out_of_memory ? 'worse' : ''}>{c.out_of_memory}</td>
+                      <td className={c.upgrades ? 'better' : ''}>
+                        {c.upgrades}
+                        {c.upgrade_failures > 0 && <span className="worse"> ({c.upgrade_failures} failed)</span>}
+                      </td>
+                      <td className="nowrap">{c.sandbox_gb === null ? '–' : `${c.sandbox_gb} GB`}</td>
+                    </tr>
+                    {open === c.conversation && (
+                      <tr className="detail-row">
+                        <td colSpan={9}>
+                          <ConversationDetail id={c.conversation} onClose={() => setOpen(null)} />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>
