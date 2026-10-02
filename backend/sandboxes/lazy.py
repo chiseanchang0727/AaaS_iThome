@@ -64,7 +64,13 @@ class Upgrade:
 
 log = logging.getLogger(__name__)
 
-LIGHTER = "select fewer columns, aggregate earlier, query files with DuckDB, process in chunks or sample"
+LIGHTER = (
+    "rewrite it with DuckDB, which works through files bigger than memory, including medians, "
+    "percentiles and distinct counts that polars cannot stream: "
+    "`import duckdb; con = duckdb.connect(); con.execute(\"SET memory_limit='600MB'\")`, then "
+    "`con.sql(\"SELECT device, median(x) FROM '/path/file.parquet' GROUP BY device\").pl()`. "
+    "Selecting fewer columns, aggregating earlier or sampling also help"
+)
 TRY_LIGHTER = (
     f"Out of memory in this sandbox. Try a lighter approach first: {LIGHTER}. "
     "A bigger sandbox becomes available only if a changed attempt still runs out of memory."

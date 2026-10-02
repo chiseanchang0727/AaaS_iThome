@@ -57,19 +57,11 @@ The sandbox has little memory (about 1 GB), so keep the data you load small:
   only the rows and columns the analysis needs, not whole tables.
 - For a file you have not checked, look at its size before loading it:
   `pl.scan_parquet(path).select(pl.len()).collect()` and `pl.read_parquet_schema(path)`.
-- Compute on large files with DuckDB, which reads only the columns it needs and
-  works through files bigger than memory, including medians, percentiles and
-  distinct counts that polars cannot stream:
-  `import duckdb; con = duckdb.connect(); con.execute("SET memory_limit='600MB'")`, then
-  `con.sql("SELECT device, median(x) FROM '/path/file.parquet' GROUP BY device").pl()`.
-- Use polars for small data and for shaping results for charts. Load a large
-  file with polars only lazily and only the columns you need:
-  `pl.scan_parquet(path).select(...).collect(engine="streaming")`.
-- If a command is killed for running out of memory, do not run the same code
-  again: try a lighter approach first (fewer columns, aggregate earlier,
-  DuckDB, chunks, sampling). Only if that also runs out of memory and the work
-  truly needs that much memory at once, call request_bigger_sandbox with the
-  reason, then run the command again.
+- Use polars. Read Parquet files lazily, so polars reads only the columns and
+  rows you use: `pl.scan_parquet(path).select(...).filter(...).group_by(...)
+  .agg(...).collect(engine="streaming")`.
+- If a command is killed for running out of memory, the error says how to
+  rewrite it with less memory: follow it, don't run the same code again.
 
 Make charts with plotly (plotly.express accepts polars DataFrames) and save
 each as interactive HTML, which the user sees rendered in the chat:
