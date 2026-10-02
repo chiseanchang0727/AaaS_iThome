@@ -10,13 +10,21 @@ conversation ended), each call returns that operation's error result, the way
 a sandbox reports a failed command or a missing file. The agent sees the
 reason as a tool result and can still answer from what it already has.
 
-A command killed for running out of memory first goes back to the agent, with
-advice to use less memory and the option to ask for more: rewriting is
-cheaper than a bigger machine, and only the agent knows whether the work can
-be split. `request_bigger` (the agent's request_bigger_sandbox tool) gets a
-bigger sandbox through `on_out_of_memory`: the server starts it and copies the
-work over, and later commands run there. As a safety net, a command killed a
-second time is moved and run again without asking.
+A command killed for running out of memory goes back to the agent: rewriting
+is cheaper than a bigger machine, and only the agent knows whether the work
+can be split. With `retries_first` = 1 (the default):
+
+    1st kill            try a lighter approach first; no bigger sandbox yet
+    same code again     doesn't count: change the approach first
+    a changed attempt
+      also killed       now the agent may call request_bigger_sandbox(reason)
+    one more kill       safety net: moved and run again without asking
+
+An attempt is a command plus the files as they were: running a different
+command, or the same one after write_file / edit_file, is a new attempt.
+`request_bigger` (the tool) gets the bigger sandbox through
+`on_out_of_memory`: the server starts it and copies the work over, and later
+commands run there. `retries_first` = 0 allows asking right after a kill.
 
 Thread-safe: the agent calls sandbox methods from worker threads.
 """
@@ -56,11 +64,28 @@ class Upgrade:
 
 log = logging.getLogger(__name__)
 
+LIGHTER = "select fewer columns, aggregate earlier, query files with DuckDB, process in chunks or sample"
+TRY_LIGHTER = (
+    f"Out of memory in this sandbox. Try a lighter approach first: {LIGHTER}. "
+    "A bigger sandbox becomes available only if a changed attempt still runs out of memory."
+)
+SAME_AGAIN = (
+    "This is the same code that already ran out of memory. Change the approach before running it again: "
+    f"{LIGHTER}."
+)
+MAY_ASK = (
+    "Still out of memory. If the work truly needs this much memory at once, call "
+    "request_bigger_sandbox with the reason, then run the command again. Otherwise keep reducing memory: "
+    f"{LIGHTER}."
+)
 ASK_FIRST = (
-    "Out of memory in this sandbox. If the work can be done with less memory, change the approach: "
-    "select fewer columns, aggregate earlier, query files with DuckDB, process in chunks or sample. "
+    f"Out of memory in this sandbox. If the work can be done with less memory, change the approach: {LIGHTER}. "
     "If it truly needs this much memory at once, call request_bigger_sandbox with the reason, "
     "then run the command again."
+)
+NOT_YET = (
+    f"Not yet: try a lighter approach first ({LIGHTER}). A bigger sandbox is available after a changed "
+    "attempt also runs out of memory."
 )
 
 START_TIMEOUT = 180.0
@@ -74,7 +99,7 @@ class SandboxUnavailable(RuntimeError):
 class LazySandbox(SandboxBackendProtocol):
     """Waits for the real sandbox on first use. Settled once, by `ready` or `failed`."""
 
-    def __init__(self, start_timeout: float = START_TIMEOUT) -> None:
+    def __init__(self, start_timeout: float = START_TIMEOUT, retries_first: int = 1) -> None:
         self._future: Future[SandboxBackendProtocol] = Future()
         self._start_timeout = start_timeout
         self.on_step: Callable[[StepMeasure], None] | None = None
@@ -84,8 +109,12 @@ class LazySandbox(SandboxBackendProtocol):
         """Asks for a bigger sandbox, with the reason; called from a worker
         thread. Set by the conversation manager once the sandbox is ready."""
         self._replaced: SandboxBackendProtocol | None = None
-        self._killed: dict[str, int] = {}
-        """Out-of-memory kills per command, for the second-kill safety net."""
+        self.retries_first = retries_first
+        """Lighter attempts that must also run out of memory before a bigger sandbox."""
+        self._changes = 0
+        """Files written or edited so far: part of what makes an attempt new."""
+        self._killed_attempts: set[tuple[str, int]] = set()
+        self._kills = 0
 
     def ready(self, sandbox: SandboxBackendProtocol) -> None:
         self._future.set_result(sandbox)
@@ -131,11 +160,14 @@ class LazySandbox(SandboxBackendProtocol):
         self._record(measure)
         if not measure.out_of_memory or self.on_out_of_memory is None:
             return result
-        self._killed[command] = self._killed.get(command, 0) + 1
-        if self._killed[command] == 1:
-            # First time: the agent decides whether to rewrite or ask for more.
-            return ExecuteResponse(output=f"{result.output}\n[{ASK_FIRST}]", exit_code=result.exit_code)
-        upgrade = self._ask(f"the same command ran out of memory again: {command[:200]}")
+        attempt = (command, self._changes)
+        repeated = attempt in self._killed_attempts
+        self._killed_attempts.add(attempt)
+        self._kills += 1
+        if self._kills < self.retries_first + 2:
+            return ExecuteResponse(output=f"{result.output}\n[{self._advice(repeated)}]", exit_code=result.exit_code)
+        # Safety net: still killed after the agent could have asked.
+        upgrade = self._ask(f"ran out of memory {self._kills} times; the last: {command[:200]}")
         if upgrade.sandbox is None:
             return ExecuteResponse(output=f"{result.output}\n[{upgrade.note}]", exit_code=result.exit_code)
         retried, measure = run_measured(upgrade.sandbox, command, timeout)
@@ -147,10 +179,22 @@ class LazySandbox(SandboxBackendProtocol):
             truncated=retried.truncated,
         )
 
+    @property
+    def may_ask(self) -> bool:
+        """Whether enough different attempts ran out of memory to allow a bigger sandbox."""
+        return len(self._killed_attempts) >= self.retries_first + 1
+
+    def _advice(self, repeated: bool) -> str:
+        if self.may_ask:
+            return ASK_FIRST if self.retries_first == 0 and self._kills == 1 else MAY_ASK
+        return SAME_AGAIN if repeated else TRY_LIGHTER
+
     def request_bigger(self, reason: str) -> str:
         """Move to a bigger sandbox for work that needs more memory. What happened, for the agent."""
         if self.on_out_of_memory is None:
             return "No bigger sandbox is available here."
+        if not self.may_ask:
+            return NOT_YET
         upgrade = self._ask(reason)
         if upgrade.sandbox is None:
             return upgrade.note
@@ -203,12 +247,14 @@ class LazySandbox(SandboxBackendProtocol):
             return GlobResult(error=self._why(e))
 
     def write(self, file_path: str, content: str) -> WriteResult:
+        self._changes += 1
         try:
             return self._real().write(file_path, content)
         except SandboxUnavailable as e:
             return WriteResult(error=self._why(e), path=file_path)
 
     def edit(self, file_path: str, old_string: str, new_string: str, replace_all: bool = False) -> EditResult:
+        self._changes += 1
         try:
             return self._real().edit(file_path, old_string, new_string, replace_all)
         except SandboxUnavailable as e:

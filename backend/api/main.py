@@ -42,6 +42,7 @@ manager = ConversationManager(
     bigger_sandbox=(cfg.server.bigger_sandbox.memory_gb, cfg.server.bigger_sandbox.cpu)
     if cfg.server.bigger_sandbox else None,
     work_dir=cfg.sandbox.data_dir.parent,
+    retries_first=cfg.server.bigger_sandbox.retries_first if cfg.server.bigger_sandbox else 1,
 )
 
 history = HistoryStore(cfg.server.history_dir)

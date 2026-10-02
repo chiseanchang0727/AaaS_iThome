@@ -114,6 +114,7 @@ class ConversationManager:
         max_memory_gb: int | None = None,
         bigger_sandbox: tuple[int, int] | None = None,
         work_dir: PurePosixPath | None = None,
+        retries_first: int = 1,
         copy_files: Callable[[SandboxBackendProtocol, SandboxBackendProtocol], None] | None = None,
     ) -> None:
         if max_sandboxes is not None and warm_sandboxes > max_sandboxes:
@@ -138,6 +139,7 @@ class ConversationManager:
         if copy_files is None and work_dir is not None:
             copy_files = lambda old, new: copy_work_dir(old, new, work_dir)  # noqa: E731
         self._copy_files = copy_files
+        self._retries_first = retries_first
         self._held: Counter[str] = Counter()
         """Slots each account holds (its conversations' sandboxes, started or starting)."""
         self._changed = asyncio.Event()
@@ -272,7 +274,7 @@ class ConversationManager:
         if self._provider is None:
             conversation.agent = self._build_agent(None, self.checkpointer)
             return
-        lazy = LazySandbox()
+        lazy = LazySandbox(retries_first=self._retries_first)
         conversation.stand_in = lazy
         conversation.agent = self._build_agent(lazy, self.checkpointer)
         task = asyncio.create_task(self._start_for(conversation, lazy, have_slot))

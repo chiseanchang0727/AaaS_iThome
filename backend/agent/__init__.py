@@ -66,10 +66,10 @@ The sandbox has little memory (about 1 GB), so keep the data you load small:
   file with polars only lazily and only the columns you need:
   `pl.scan_parquet(path).select(...).collect(engine="streaming")`.
 - If a command is killed for running out of memory, do not run the same code
-  again: select fewer columns, aggregate earlier, or switch to DuckDB. Only if
-  the work truly needs that much memory at once (when you have it, the
-  request_bigger_sandbox tool says why it is needed), ask for a bigger sandbox,
-  then run the command again.
+  again: try a lighter approach first (fewer columns, aggregate earlier,
+  DuckDB, chunks, sampling). Only if that also runs out of memory and the work
+  truly needs that much memory at once, call request_bigger_sandbox with the
+  reason, then run the command again.
 
 Make charts with plotly (plotly.express accepts polars DataFrames) and save
 each as interactive HTML, which the user sees rendered in the chat:

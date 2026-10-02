@@ -10,6 +10,9 @@ class SandboxSize(BaseModel):
 
     memory_gb: int = Field(ge=1)
     cpu: int = Field(default=1, ge=1)
+    retries_first: int = Field(default=1, ge=0)
+    """Lighter attempts that must also run out of memory before the agent may
+    ask for this size (sandboxes/lazy.py). 0: it may ask right after a kill."""
 
 
 class ServerConfig(BaseModel):

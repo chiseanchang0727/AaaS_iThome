@@ -174,11 +174,11 @@ def make_request_bigger_sandbox(sandbox) -> BaseTool:
     def request_bigger_sandbox(reason: str) -> str:
         """Move this conversation to a sandbox with more memory (e.g. 1 GB -> 4 GB).
 
-        Use only after a command was killed for running out of memory, and only
-        when the work truly needs that much memory at once; otherwise change the
-        approach (fewer columns, aggregate earlier, DuckDB, chunks, sampling),
-        which is cheaper. `reason`: one sentence on why the memory is needed.
-        Files in the work folder are copied over. Run the command again after.
+        Only for work that truly needs that much memory at once, and only after
+        a lighter approach (fewer columns, aggregate earlier, DuckDB, chunks,
+        sampling) was tried and also ran out of memory: asked earlier, it says
+        "Not yet". `reason`: one sentence on why the memory is needed. Files in
+        the work folder are copied over. Run the command again after.
         """
         return sandbox.request_bigger(reason)
 

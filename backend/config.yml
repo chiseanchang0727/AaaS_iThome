@@ -86,6 +86,9 @@ server:
   bigger_sandbox:
     memory_gb: 4
     cpu: 2
+    # Out of memory: the agent must first try a lighter approach this many
+    # times before it may ask for the bigger sandbox. 0: ask right away.
+    retries_first: 1
   # Requests without an X-Account header belong to this account (no login yet).
   default_account: test_user
   # Kept started and ready, so a new conversation skips the ~12s start. They
