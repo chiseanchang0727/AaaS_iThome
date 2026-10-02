@@ -27,13 +27,15 @@ def _account(records: list[dict[str, Any]]) -> str:
 def step_roles(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """What each code step was, by its line id, worked out from the log:
 
-        first            no out-of-memory kill yet in this conversation
+        first            normal work: no out-of-memory kill waiting to be solved
         rewrite (n)      after a kill, a changed attempt: another command, or the
                          same one after write_file / edit_file
         same code        after a kill, the same command with no file changed
         bigger sandbox   after the conversation moved to a bigger sandbox
 
     The same rule as the stand-in (sandboxes/lazy.py), applied to the record.
+    A kill is solved by the first step after it that succeeds; steps after
+    that are normal work again (e.g. drawing the chart).
     """
     roles: dict[str, dict[str, Any]] = {}
     changes, kills, rewrites, moved = 0, 0, 0, False
@@ -58,20 +60,26 @@ def step_roles(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             if r.get("signal") == 9 and _near_limit(r):
                 kills += 1
                 killed.add(attempt)
+            elif kills and r.get("exit_code") == 0 and info["strategy"] != "bigger sandbox":
+                info["solved"] = True     # this rewrite solved it: back to normal work
+                kills, killed = 0, set()
+            elif r.get("exit_code") == 0 and info["strategy"] == "bigger sandbox":
+                info["solved"] = kills > 0
+                kills, killed = 0, set()
             roles[r.get("id", "")] = info
     return roles
 
 
 def resolution(records: list[dict[str, Any]], roles: dict[str, dict[str, Any]]) -> str | None:
-    """How an out-of-memory kill ended: 'rewrite', 'bigger sandbox', 'not resolved', or None (no kill)."""
+    """How the last out-of-memory kill ended: 'rewrite', 'bigger sandbox', 'not resolved', or None (no kill)."""
     steps = [r for r in records if r.get("role") == "sandbox_step"]
     if not any(r.get("signal") == 9 and _near_limit(r) for r in steps):
         return None
-    last = steps[-1]
-    if last.get("exit_code") != 0:
+    solved = [roles.get(r.get("id", ""), {}) for r in steps if roles.get(r.get("id", ""), {}).get("solved")]
+    last_kill = max(i for i, r in enumerate(steps) if r.get("signal") == 9 and _near_limit(r))
+    if not any(roles.get(r.get("id", ""), {}).get("solved") for r in steps[last_kill + 1:]):
         return "not resolved"
-    strategy = roles.get(last.get("id", ""), {}).get("strategy")
-    return "bigger sandbox" if strategy == "bigger sandbox" else "rewrite"
+    return solved[-1]["strategy"] if solved[-1]["strategy"] == "bigger sandbox" else "rewrite"
 
 
 def conversation_rows(history: HistoryStore) -> list[dict[str, Any]]:

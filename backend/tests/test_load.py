@@ -143,7 +143,7 @@ def test_steps_are_marked_first_rewrite_same_code_or_bigger(tmp_path):
     records = history.read("c")
     roles = [step_roles(records)[r["id"]] for r in records if r["role"] == "sandbox_step"]
     assert roles == [{"strategy": "first"}, {"strategy": "first"}, {"strategy": "same code"},
-                     {"strategy": "rewrite", "rewrite": 1}, {"strategy": "rewrite", "rewrite": 2}]
+                     {"strategy": "rewrite", "rewrite": 1}, {"strategy": "rewrite", "rewrite": 2, "solved": True}]
     assert resolution(records, step_roles(records)) == "rewrite"
 
     [row] = client(history).get("/api/load").json()["conversations"]
@@ -186,3 +186,22 @@ def test_a_conversation_is_named_by_the_question_that_ran_code(tmp_path):
     history.start_turn("c", "median per device with polars", "alice").record_step(step("python3 m.py", 1, 1, 200))
     [row] = client(history).get("/api/load").json()["conversations"]
     assert row["question"] == "median per device with polars"
+
+
+
+def test_steps_after_a_solved_kill_are_normal_work_again(tmp_path):
+    from api.load import resolution, step_roles
+
+    history = store(tmp_path)
+    log = history.start_turn("c", "typical session length per device", "alice")
+    log.record_step(step("python3 inspect.py", 0.2, 0.2, 52))
+    log.record_step(step("python3 polars_median.py", 2, 2, 966, exit_code=137, signal=9))
+    log.record_step(step("python3 duckdb_median.py", 1, 1, 335))            # solves it
+    log.record_step(step("python3 chart.py", 1, 1, 55))                     # just the chart
+    records = history.read("c")
+    roles = step_roles(records)
+    assert [roles[r["id"]].get("rewrite") for r in records if r["role"] == "sandbox_step"] == [None, None, 1, None]
+    assert [roles[r["id"]]["strategy"] for r in records if r["role"] == "sandbox_step"][-1] == "first"
+    assert resolution(records, roles) == "rewrite"
+    [row] = client(history).get("/api/load").json()["conversations"]
+    assert row["rewrites"] == 1
