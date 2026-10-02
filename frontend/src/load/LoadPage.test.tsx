@@ -66,9 +66,11 @@ describe('LoadPage', () => {
     expect(screen.getByRole('img', { name: 'Peak memory per step' })).toBeInTheDocument()
 
     const steps = screen.getByRole('table', { name: 'Code steps' })
-    const big = within(steps).getByRole('row', { name: /python3 big.py/ })
+    const big = within(steps).getByRole('row', { name: /alice's question/ })
     expect(big).toHaveTextContent('out of memory')
-    expect(within(steps).getByRole('row', { name: /python3 duck.py/ })).toHaveTextContent('ok')
+    expect(within(steps).getByRole('row', { name: /bob's question/ })).toHaveTextContent('ok')
+    expect(within(steps).queryByText('python3 big.py')).toBeNull() // commands are in the timeline, not here
+    expect(within(steps).queryByRole('columnheader', { name: 'When' })).toBeNull()
     expect(screen.getByRole('table', { name: 'Per account' })).toHaveTextContent('bob')
   })
 

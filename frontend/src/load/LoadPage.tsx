@@ -165,17 +165,15 @@ export function LoadPage() {
             <table className="turns steps-table" aria-label="Code steps">
               <thead>
                 <tr>
-                  <th>When</th><th>Account</th><th>Question</th><th>Command</th>
+                  <th>Account</th><th>Question</th>
                   <th>Run</th><th>CPU</th><th>Peak memory</th><th>Result</th>
                 </tr>
               </thead>
               <tbody>
                 {load.steps.map((s, i) => (
                   <tr key={`${s.conversation}-${s.ts}-${i}`}>
-                    <td className="muted nowrap">{new Date(s.ts).toLocaleTimeString()}</td>
                     <td>{s.account}</td>
                     <td className="prompt" title={`conversation ${s.conversation}, turn ${s.turn}`}>{s.prompt}</td>
-                    <td><code className="command" title={s.command}>{s.command}</code></td>
                     <td className="nowrap">{seconds(s.run_seconds)}</td>
                     <td className="nowrap">{seconds(s.cpu_seconds)}</td>
                     <td className="nowrap">
