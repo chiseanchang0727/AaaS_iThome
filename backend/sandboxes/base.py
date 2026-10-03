@@ -131,6 +131,13 @@ class SandboxProvider(ABC):
             self.destroy(sandbox)
 
 
+def make_dirs(sandbox: SandboxBackendProtocol, *dirs: PurePosixPath) -> None:
+    """Create folders the agent is told to use, so its first write to them works."""
+    made = sandbox.execute("mkdir -p " + " ".join(shlex.quote(str(d)) for d in dirs))
+    if made.exit_code != 0:
+        raise SandboxSetupError(f"could not create {', '.join(map(str, dirs))}: {made.output.strip()[-300:]}")
+
+
 WORK_ARCHIVE = "/tmp/aaas-work.tgz"
 
 

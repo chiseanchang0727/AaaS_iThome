@@ -443,3 +443,13 @@ def test_a_failed_copy_says_what_failed(tmp_path):
     old, new = Rooted(tmp_path / "old"), Rooted(tmp_path / "new")
     with pytest.raises(SandboxSetupError, match="could not pack"):
         copy_work_dir(old, new, PurePosixPath("/missing"))
+
+
+
+def test_the_folders_the_agent_uses_exist_before_it_starts(tmp_path):
+    from sandboxes.base import make_dirs
+
+    sandbox = LocalShellBackend(root_dir=tmp_path, virtual_mode=False)
+    make_dirs(sandbox, PurePosixPath(str(tmp_path / "data")), PurePosixPath(str(tmp_path / "outputs")))
+    assert (tmp_path / "data").is_dir() and (tmp_path / "outputs").is_dir()
+    make_dirs(sandbox, PurePosixPath(str(tmp_path / "outputs")))  # already there: fine

@@ -5,6 +5,7 @@
 
 import uuid
 from pathlib import Path
+import asyncio
 from urllib.parse import urlsplit
 
 from agent import build_agent
@@ -12,6 +13,7 @@ from config import cfg
 from datasets import DatasetStore
 from datasources import close_database
 from sandboxes import get_provider
+from sandboxes.base import make_dirs
 
 from .app import create_app
 from .conversations import ConversationManager
@@ -27,13 +29,22 @@ store = DatasetStore(
     reader_role=lambda: urlsplit(cfg.database.dsn).username,
 )
 
+copy_uploads = upload_files_hook(store, cfg.sandbox.data_dir)
+
+
+async def ready_for_conversation(sandbox) -> None:
+    """Create the data and outputs folders the agent is told to use, then copy uploaded files in."""
+    await asyncio.to_thread(make_dirs, sandbox, cfg.sandbox.data_dir, cfg.sandbox.output_dir)
+    await copy_uploads(sandbox)
+
+
 manager = ConversationManager(
     build_agent=lambda sandbox, checkpointer: build_agent(sandbox=sandbox, checkpointer=checkpointer),
     # role and server mark this run's sandboxes, so the next run can delete
     # any it leaves behind (see ConversationManager.clean_up_leftovers).
     provider=get_provider(cfg.sandbox, labels={"role": "api", "server": uuid.uuid4().hex[:12]}),
     idle_seconds=cfg.server.sandbox_idle_minutes * 60,
-    on_sandbox_ready=upload_files_hook(store, cfg.sandbox.data_dir),
+    on_sandbox_ready=ready_for_conversation,
     max_sandboxes=cfg.server.max_sandboxes,
     wait_seconds=cfg.server.sandbox_wait_seconds,
     warm_sandboxes=cfg.server.warm_sandboxes,
