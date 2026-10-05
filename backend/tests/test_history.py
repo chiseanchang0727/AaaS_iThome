@@ -23,7 +23,8 @@ def test_a_turn_writes_one_line_per_message(tmp_path):
 
     ts = "2026-09-30T10:00:00Z"
     assert history.read(thread_id) == [
-        {"id": "id1", "previous": None, "turn": 1, "role": "user", "content": "How many rows?", "ts": ts},
+        {"id": "id1", "previous": None, "turn": 1, "role": "user", "content": "How many rows?",
+         "account": "test_user", "ts": ts},
         {"id": "id2", "previous": "id1", "turn": 1, "role": "assistant", "content": "Let me check.",
          "tool_calls": [{"id": "c1", "name": "query_database", "args": {"sql": "SELECT 1"}}], "ts": ts},
         {"id": "id3", "previous": "id2", "turn": 1, "role": "tool", "tool_call_id": "c1", "name": "query_database",

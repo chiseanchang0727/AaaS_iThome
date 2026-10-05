@@ -3,6 +3,7 @@ import Markdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 
 import { ArtifactView } from './ArtifactView'
+import { SandboxStatus } from './SandboxStatus'
 import type { Message } from './state'
 import { Steps } from './Steps'
 import { useChat } from './useChat'
@@ -19,6 +20,11 @@ function MessageView({ message }: { message: Message }) {
   const streaming = message.status === 'streaming'
   return (
     <div className="message message-assistant">
+      {message.notices?.map((notice, i) => (
+        <p key={i} className="notice" role="status">
+          {notice}
+        </p>
+      ))}
       <Steps steps={message.steps} streaming={streaming} />
       {message.text && (
         <div className="answer">
@@ -65,6 +71,7 @@ export function ChatPage() {
           New conversation
         </button>
       </header>
+      <SandboxStatus refreshKey={busy} />
 
       <div className="messages">
         {messages.length === 0 ? (

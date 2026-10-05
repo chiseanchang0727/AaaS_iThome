@@ -20,7 +20,7 @@ from datasets import Registry
 
 from .middleware import SkillEnforcerMiddleware
 from .skill_router import SkillRouterMiddleware, build_classifier
-from .tools import make_export_query, make_list_datasets, query_database
+from .tools import make_export_query, make_list_datasets, make_request_bigger_sandbox, query_database
 
 __all__ = ["build_agent", "SYSTEM_PROMPT", "SANDBOX_PROMPT"]
 
@@ -48,9 +48,20 @@ and for charts and report files. Get data into it with export_query, which
 saves a query's rows as a Parquet file in {data_dir}; then work on it in
 Python. execute runs shell commands, not Python: write your code to a .py file
 with write_file, then run it with execute (`python3 /path/to/script.py`). Use
-polars, not pandas: load the file with `pl.read_parquet(path)`.
+polars, not pandas.
 Save every chart or report you make to {output_dir}: files there are handed to
 the user after the run.
+
+The sandbox has little memory (about 1 GB), so keep the data you load small:
+- Do the heavy work in SQL: filter, join and aggregate in the query, and export
+  only the rows and columns the analysis needs, not whole tables.
+- For a file you have not checked, look at its size before loading it:
+  `pl.scan_parquet(path).select(pl.len()).collect()` and `pl.read_parquet_schema(path)`.
+- Use polars. Read Parquet files lazily, so polars reads only the columns and
+  rows you use: `pl.scan_parquet(path).select(...).filter(...).group_by(...)
+  .agg(...).collect(engine="streaming")`.
+- If a command is killed for running out of memory, the error says how to
+  rewrite it with less memory: follow it, don't run the same code again.
 
 Make charts with plotly (plotly.express accepts polars DataFrames) and save
 each as interactive HTML, which the user sees rendered in the chat:
@@ -118,6 +129,8 @@ def build_agent(
         system_prompt += SANDBOX_PROMPT.format(
             data_dir=cfg.sandbox.data_dir, output_dir=cfg.sandbox.output_dir
         )
+        if hasattr(sandbox, "request_bigger"):  # the API's stand-in, which can move sandboxes
+            tools.append(make_request_bigger_sandbox(sandbox))
 
     middleware = []
     if router := skill_router():

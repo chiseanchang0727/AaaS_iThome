@@ -1,8 +1,10 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router'
 
 import { ChatPage } from './chat/ChatPage'
+import { getAccount } from './api/account'
 import { DataPage } from './data/DataPage'
 import { EvalsPage } from './evals/EvalsPage'
+import { LoadPage } from './load/LoadPage'
 
 export default function App() {
   return (
@@ -12,12 +14,17 @@ export default function App() {
         <NavLink to="/chat">Chat</NavLink>
         <NavLink to="/data">Data</NavLink>
         <NavLink to="/evals">Evals</NavLink>
+        <NavLink to="/load">Load</NavLink>
+        <span className="account" title="No login yet: requests are sent as this account">
+          {getAccount()}
+        </span>
       </nav>
       <main className="main">
         <Routes>
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/data" element={<DataPage />} />
           <Route path="/evals/*" element={<EvalsPage />} />
+          <Route path="/load" element={<LoadPage />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
         </Routes>
       </main>

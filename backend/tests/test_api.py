@@ -6,6 +6,7 @@ and can drop files into its sandbox as if it had made them.
 
 import asyncio
 import json
+import threading
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -15,6 +16,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.errors import GraphRecursionError
 
 from api import ConversationManager, HistoryStore, create_app
+from api.history import to_messages
 from api.events import RESULT_CHARS
 from sandboxes import SandboxProvider
 
@@ -33,9 +35,13 @@ class TempDirProvider(SandboxProvider):
         super().__init__()
         self.root, self.fail_prepare = root, fail_prepare
         self.created, self.destroyed = [], []
+        self._lock, self._next = threading.Lock(), 0
 
     def create(self):
-        path = self.root / f"sandbox-{len(self.created)}"
+        # Sandboxes start side by side (in threads), so number them under a lock.
+        with self._lock:
+            path = self.root / f"sandbox-{self._next}"
+            self._next += 1
         path.mkdir()
         sandbox = LocalShellBackend(root_dir=path, virtual_mode=True)
         self.created.append(sandbox)
@@ -69,7 +75,9 @@ class ScriptedAgent:
             if isinstance(update, Exception):
                 raise update
             if callable(update):
-                update(self.sandbox)
+                # In a worker thread, like the real agent's tools: the sandbox
+                # may still be starting, and waiting for it must not block the loop.
+                await asyncio.to_thread(update, self.sandbox)
                 continue
             yield update
 
@@ -79,7 +87,7 @@ def write_output(name: str, content: bytes):
 
 
 class Harness:
-    def __init__(self, tmp_path: Path, turns=(), provider=None, idle_seconds=900, history=None):
+    def __init__(self, tmp_path: Path, turns=(), provider=None, idle_seconds=900, history=None, **manager_options):
         self.now = 0.0
         self.provider = provider if provider is not None else TempDirProvider(tmp_path)
         self.agents: list[ScriptedAgent] = []
@@ -96,7 +104,7 @@ class Harness:
             self.shutdown_called = True
 
         self.manager = ConversationManager(
-            build, self.provider, idle_seconds=idle_seconds, clock=lambda: self.now
+            build, self.provider, idle_seconds=idle_seconds, clock=lambda: self.now, **manager_options
         )
         self.artifacts = tmp_path / "artifacts"
         self.app = create_app(
@@ -207,13 +215,23 @@ def test_an_agent_crash_is_an_error_not_a_broken_stream(tmp_path):
     assert events[1]["message"] == "model unavailable"
 
 
-def test_a_sandbox_that_fails_to_start_is_an_error_and_is_deleted(tmp_path):
+def test_a_sandbox_that_fails_to_start_still_answers_and_is_deleted(tmp_path):
     harness = Harness(tmp_path, provider=TempDirProvider(tmp_path, fail_prepare=True))
     with TestClient(harness.app) as client:
         events = chat(client)
-    assert types(events) == ["thread", "error", "done"]
-    assert "pip install failed" in events[1]["message"]
+    assert types(events) == ["thread", "answer", "done"]  # SQL-only turns don't need it
     assert harness.provider.destroyed == harness.provider.created
+
+
+def test_a_code_step_without_a_sandbox_gets_the_reason(tmp_path):
+    seen = []
+    turn = [lambda sandbox: seen.append(sandbox.execute("python plot.py")),
+            {"model": {"messages": [AIMessage("Here is what I found without a chart.")]}}]
+    harness = Harness(tmp_path, [turn], provider=TempDirProvider(tmp_path, fail_prepare=True))
+    with TestClient(harness.app) as client:
+        events = chat(client)
+    assert types(events) == ["thread", "answer", "done"]
+    assert seen[0].exit_code == 1 and "pip install failed" in seen[0].output
 
 
 def test_a_busy_conversation_refuses_a_second_message(tmp_path):
@@ -322,8 +340,9 @@ def test_idle_conversations_lose_their_sandbox_but_keep_their_memory(tmp_path):
     harness = Harness(tmp_path, idle_seconds=900)
     with TestClient(harness.app) as client:
         thread_id = chat(client)[0]["thread_id"]
+        sandbox_started(client, harness, thread_id)
         harness.now = 901
-        closed = asyncio.run(harness.manager.reap_idle())
+        closed = client.portal.call(harness.manager.reap_idle)
         assert closed == [thread_id]
         assert len(harness.provider.destroyed) == 1
 
@@ -338,7 +357,7 @@ def test_recent_conversations_are_not_reaped(tmp_path):
     with TestClient(harness.app) as client:
         chat(client)
         harness.now = 899
-        assert asyncio.run(harness.manager.reap_idle()) == []
+        assert client.portal.call(harness.manager.reap_idle) == []
 
 
 def test_shutdown_deletes_every_sandbox(tmp_path):
@@ -348,3 +367,102 @@ def test_shutdown_deletes_every_sandbox(tmp_path):
         chat(client)
     assert len(harness.provider.destroyed) == 2
     assert harness.shutdown_called
+
+
+# --- sandbox limits and recovery -------------------------------------------------
+
+
+def sandbox_started(client, harness, thread_id):
+    """Wait, on the app's event loop, for the conversation's background sandbox start."""
+
+    async def wait():
+        await harness.manager.get(thread_id).starting
+
+    client.portal.call(wait)
+
+
+class DyingProvider(TempDirProvider):
+    """A TempDirProvider whose sandboxes can be made to stop answering."""
+
+    alive = True
+
+    def is_alive(self, sandbox):
+        return self.alive
+
+
+def test_a_full_house_still_answers_and_code_steps_say_why(tmp_path):
+    seen = []
+    code_turn = [lambda sandbox: seen.append(sandbox.execute("echo hi")),
+                 {"model": {"messages": [AIMessage("ok")]}}]
+    harness = Harness(tmp_path, [code_turn], max_sandboxes=1, wait_seconds=0)
+    with TestClient(harness.app) as client:
+        chat(client)  # takes the only sandbox
+        events = chat(client)  # a second conversation
+    assert types(events) == ["thread", "answer", "done"]
+    assert seen[0].exit_code == 0
+    assert seen[1].exit_code == 1 and "all 1 sandboxes are in use" in seen[1].output
+
+
+def test_a_dead_sandbox_is_replaced_and_the_user_told(tmp_path):
+    provider = DyingProvider(tmp_path)
+    harness = Harness(tmp_path, provider=provider)
+    with TestClient(harness.app) as client:
+        thread_id = chat(client)[0]["thread_id"]
+        sandbox_started(client, harness, thread_id)
+        harness.now += 120
+        provider.alive = False
+        events = chat(client, "again", thread_id)
+    assert types(events) == ["thread", "notice", "answer", "done"]
+    assert "new one was started" in events[1]["message"]
+    # the dead one when replaced, then the new one at shutdown
+    assert len(provider.created) == 2 and provider.destroyed == provider.created
+    assert len(harness.agents) == 2  # the agent was rebuilt on the new sandbox
+
+
+
+def test_each_code_step_is_recorded_with_what_it_cost(tmp_path):
+    history = HistoryStore(tmp_path / "history", clock=lambda: "t")
+    turn = [lambda sandbox: sandbox.execute("python3 -c 'print(1)'"),
+            {"model": {"messages": [AIMessage("done")]}}]
+    harness = Harness(tmp_path, [turn], history=history)
+    with TestClient(harness.app) as client:
+        thread_id = chat(client)[0]["thread_id"]
+    [step] = [r for r in history.read(thread_id) if r["role"] == "sandbox_step"]
+    assert step["turn"] == 1 and step["command"] == "python3 -c 'print(1)'"
+    assert step["exit_code"] == 0 and step["peak_memory_mb"] > 0
+    assert "sandbox_step" not in {type(m).__name__ for m in to_messages(history.read(thread_id))}
+
+
+
+# --- accounts --------------------------------------------------------------------
+
+
+def chat_as(client, account, message="hi", thread_id=None):
+    body = {"message": message} | ({"thread_id": thread_id} if thread_id else {})
+    with client.stream("POST", "/api/chat", json=body, headers={"X-Account": account}) as response:
+        return response.status_code, events_of(response) if response.status_code == 200 else None
+
+
+def test_without_a_header_the_account_is_test_user(tmp_path):
+    history = HistoryStore(tmp_path / "history", clock=lambda: "t")
+    harness = Harness(tmp_path, history=history)
+    with TestClient(harness.app) as client:
+        thread_id = chat(client)[0]["thread_id"]
+        assert client.get("/api/sandboxes").json()["account"] == "test_user"
+    assert history.read(thread_id)[0]["account"] == "test_user"
+
+
+def test_another_account_cannot_use_or_end_a_conversation(tmp_path):
+    harness = Harness(tmp_path)
+    with TestClient(harness.app) as client:
+        status, events = chat_as(client, "alice")
+        thread_id = events[0]["thread_id"]
+        assert chat_as(client, "bob", "let me in", thread_id)[0] == 404
+        assert client.delete(f"/api/conversations/{thread_id}", headers={"X-Account": "bob"}).status_code == 404
+        assert chat_as(client, "alice", "again", thread_id)[0] == 200
+        assert client.delete(f"/api/conversations/{thread_id}", headers={"X-Account": "alice"}).json() == {"closed": True}
+
+
+def test_a_malformed_account_is_rejected(tmp_path):
+    with TestClient(Harness(tmp_path).app) as client:
+        assert chat_as(client, "Bob Smith!")[0] == 400

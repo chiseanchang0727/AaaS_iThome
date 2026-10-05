@@ -1,6 +1,6 @@
 """Sandbox providers: the ABC, the registry, and Daytona against a fake client."""
 
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import daytona
 import pytest
@@ -220,12 +220,16 @@ class FakeDaytona:
         self.created, self.deleted = [], []
         FakeDaytona.instances.append(self)
 
-    def create(self, params):
+    def create(self, params, timeout=None):
         self.created.append(params)
         return FakeRawSandbox(f"sbx-{len(self.created)}")
 
     def delete(self, sandbox):
         self.deleted.append(sandbox)
+
+    def list(self, query=None):
+        self.queries = [*getattr(self, "queries", []), query]
+        return iter(getattr(self, "existing", []))
 
 
 @pytest.fixture
@@ -315,4 +319,137 @@ def test_daytona_session_deletes_on_error(fake_daytona):
 
 def test_daytona_options_reject_unknown_keys():
     with pytest.raises(ValidationError):
-        DaytonaOptions(image="python:3.12")
+        DaytonaOptions(gpu_type="H100")
+
+
+
+# --- labels ------------------------------------------------------------------
+
+
+def test_get_provider_adds_labels_to_the_configured_ones():
+    config = sandbox_config("daytona")
+    config.labels = {"app": "aaas-ithome", "env": "dev"}
+    provider = get_provider(config, labels={"role": "api", "server": "s1"})
+    assert provider.labels == {"app": "aaas-ithome", "env": "dev", "role": "api", "server": "s1"}
+
+
+def test_daytona_puts_the_labels_on_every_sandbox(fake_daytona):
+    DaytonaProvider(labels={"app": "aaas-ithome", "server": "s1"}).create()
+    [params] = fake_daytona.instances[0].created
+    assert params.labels == {"app": "aaas-ithome", "server": "s1"}
+
+
+def test_daytona_without_labels_sends_none(fake_daytona):
+    DaytonaProvider().create()
+    [params] = fake_daytona.instances[0].created
+    assert not params.labels
+
+
+class FakeListed:
+    def __init__(self, id, labels, state="started"):
+        self.id, self.labels, self.state = id, labels, state
+
+
+def test_daytona_finds_sandboxes_by_label_and_deletes_them(fake_daytona):
+    provider = DaytonaProvider()
+    provider._get_client().existing = [FakeListed("old-1", {"app": "a", "server": "s0"})]
+    [found] = provider.find({"app": "a"})
+    assert (found.id, found.labels, found.state) == ("old-1", {"app": "a", "server": "s0"}, "started")
+    assert fake_daytona.instances[0].queries[0].labels == {"app": "a"}
+    provider.delete_found(found)
+    assert [s.id for s in fake_daytona.instances[0].deleted] == ["old-1"]
+
+
+def test_a_provider_that_cannot_list_finds_nothing(tmp_path):
+    assert LocalProvider(root=tmp_path).find({"app": "a"}) == []
+
+
+
+# --- bigger sandboxes --------------------------------------------------------------
+
+
+def test_daytona_bigger_sandboxes_come_from_an_image_with_resources(fake_daytona):
+    from daytona import CreateSandboxFromImageParams
+
+    provider = DaytonaProvider({"snapshot": "py-data", "auto_stop_interval": 15}, labels={"app": "a"})
+    backend = provider.create_bigger(memory_gb=4, cpu=2)
+    [params] = fake_daytona.instances[0].created
+    assert isinstance(params, CreateSandboxFromImageParams)
+    assert params.image == "daytonaio/sandbox:0.8.0"
+    assert (params.resources.memory, params.resources.cpu) == (4, 2)
+    assert params.auto_stop_interval == 15 and params.labels == {"app": "a"}
+    provider.destroy(backend)
+    assert len(fake_daytona.instances[0].deleted) == 1
+
+
+def test_a_provider_that_cannot_size_says_so():
+    with pytest.raises(NotImplementedError):
+        LocalProvider().create_bigger(4, 2)
+
+
+class Rooted:
+    """A sandbox whose /work and /tmp live in its own folder on this machine."""
+
+    def __init__(self, root):
+        self.root = root
+        (root / "work").mkdir(parents=True, exist_ok=True)
+        (root / "tmp").mkdir(exist_ok=True)
+
+    def _local(self, text):
+        return text.replace("/tmp/", f"{self.root}/tmp/").replace("/work", f"{self.root}/work")
+
+    def execute(self, command, timeout=None):
+        import subprocess
+
+        p = subprocess.run(["bash", "-c", self._local(command)], capture_output=True, text=True)
+        return ExecuteResponse(output=p.stdout + p.stderr, exit_code=p.returncode)
+
+    def download_files(self, paths):
+        from deepagents.backends.protocol import FileDownloadResponse
+        from pathlib import Path
+
+        return [FileDownloadResponse(path=p, content=Path(self._local(p)).read_bytes()) for p in paths]
+
+    def upload_files(self, files):
+        from deepagents.backends.protocol import FileUploadResponse
+        from pathlib import Path
+
+        for path, content in files:
+            Path(self._local(path)).write_bytes(content)
+        return [FileUploadResponse(path=p) for p, _ in files]
+
+
+def test_the_work_folder_is_copied_to_the_new_sandbox(tmp_path):
+    from sandboxes.base import copy_work_dir
+
+    old, new = Rooted(tmp_path / "old"), Rooted(tmp_path / "new")
+    (old.root / "work" / "data").mkdir()
+    (old.root / "work" / "data" / "rows.parquet").write_bytes(b"PAR1 rows")
+    (old.root / "work" / "script.py").write_text("print('hi')")
+    (old.root / "work" / ".cache").mkdir()
+    (old.root / "work" / ".cache" / "big").write_text("skip me")
+
+    copy_work_dir(old, new, PurePosixPath("/work"))
+
+    assert (new.root / "work" / "data" / "rows.parquet").read_bytes() == b"PAR1 rows"
+    assert (new.root / "work" / "script.py").read_text() == "print('hi')"
+    assert not (new.root / "work" / ".cache").exists()
+    assert not (new.root / "tmp" / "aaas-work.tgz").exists()  # cleaned up
+
+
+def test_a_failed_copy_says_what_failed(tmp_path):
+    from sandboxes.base import SandboxSetupError, copy_work_dir
+
+    old, new = Rooted(tmp_path / "old"), Rooted(tmp_path / "new")
+    with pytest.raises(SandboxSetupError, match="could not pack"):
+        copy_work_dir(old, new, PurePosixPath("/missing"))
+
+
+
+def test_the_folders_the_agent_uses_exist_before_it_starts(tmp_path):
+    from sandboxes.base import make_dirs
+
+    sandbox = LocalShellBackend(root_dir=tmp_path, virtual_mode=False)
+    make_dirs(sandbox, PurePosixPath(str(tmp_path / "data")), PurePosixPath(str(tmp_path / "outputs")))
+    assert (tmp_path / "data").is_dir() and (tmp_path / "outputs").is_dir()
+    make_dirs(sandbox, PurePosixPath(str(tmp_path / "outputs")))  # already there: fine

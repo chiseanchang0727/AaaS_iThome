@@ -47,12 +47,21 @@ sandbox:
     - pyarrow
     - polars
     - plotly
+    # Queries Parquet files bigger than the sandbox's memory (see SANDBOX_PROMPT).
+    - duckdb
 
   # Paths inside the sandbox. Home directories differ between providers.
   data_dir: /home/daytona/data
   output_dir: /home/daytona/outputs
 
   export_max_rows: 100000
+
+  # Put on every sandbox. At startup the API deletes sandboxes with these
+  # labels that an earlier run of it left behind (a crash). Give each
+  # deployment its own env, or they will delete each other's sandboxes.
+  labels:
+    app: aaas-ithome
+    env: dev
 
 server:
   # Relative to backend/. reports/, uploads/ and conversations/ are git-ignored.
@@ -62,4 +71,27 @@ server:
   history_dir: conversations
   # Each open conversation keeps a sandbox (billed) until idle this long.
   sandbox_idle_minutes: 15
+  # At most this many sandboxes at once. When all are taken, a new
+  # conversation waits this long for one to be freed, then is refused.
+  max_sandboxes: 10
+  sandbox_wait_seconds: 30
+  # Each account is guaranteed a sandbox (one is reclaimed from an account
+  # holding several if all are taken), and holds at most this many.
+  max_sandboxes_per_account: 3
+  # All sandboxes together may use this much memory: the Daytona account's
+  # limit (its tier). Sandboxes are 1 GB by default.
+  max_memory_gb: 10
+  # A command that runs out of memory is run again in a sandbox this big (the
+  # work folder is copied over). Delete to turn off.
+  bigger_sandbox:
+    memory_gb: 4
+    cpu: 2
+    # Out of memory: the agent must first try a lighter approach this many
+    # times before it may ask for the bigger sandbox. 0: ask right away.
+    retries_first: 1
+  # Requests without an X-Account header belong to this account (no login yet).
+  default_account: test_user
+  # Kept started and ready, so a new conversation skips the ~12s start. They
+  # count toward max_sandboxes and are billed while they wait. 0: off.
+  warm_sandboxes: 1
   max_upload_mb: 50

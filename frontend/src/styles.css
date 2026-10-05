@@ -68,6 +68,7 @@ button.danger { background: var(--danger); border-color: var(--danger); color: #
   padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
 }
 .brand { font-weight: 650; margin-right: 16px; }
+.account { margin-left: auto; font-size: 0.85em; color: var(--muted); }
 .nav a { color: var(--muted); text-decoration: none; padding: 6px 12px; border-radius: 8px; }
 .nav a.active { color: var(--text); background: var(--surface-2); }
 .main { flex: 1; width: 100%; max-width: 980px; margin: 0 auto; padding: 20px 16px; }
@@ -124,6 +125,20 @@ button.danger { background: var(--danger); border-color: var(--danger); color: #
   flex: 1; font: inherit; resize: vertical; padding: 10px 12px;
   border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); color: var(--text);
 }
+.notice {
+  margin: 0 0 10px; padding: 8px 10px; font-size: 0.9em;
+  border-left: 3px solid var(--accent); background: var(--surface-2); border-radius: 6px;
+}
+.sandbox-status {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px;
+  margin: -4px 0 12px; font-size: 0.85em;
+}
+.sandbox-count { cursor: help; }
+.sandbox-count b { font-variant-numeric: tabular-nums; }
+.sandbox-busy b { color: var(--accent); }
+.sandbox-starting b, .sandbox-warming b { color: var(--muted); }
+.sandbox-waiting b { color: var(--danger); }
+.sandbox-bigger b { color: var(--good); }
 .thread-id { font-size: 0.75em; text-align: right; margin: 0; }
 
 /* --- data ------------------------------------------------------------------ */
@@ -230,6 +245,78 @@ td.arm-cell > * { margin-right: 8px; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0 0 8px; font-size: 0.88em; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; }
+
+/* --- load ------------------------------------------------------------------ */
+
+.main:has(.load-page) { max-width: 1240px; }
+.load-page { display: flex; flex-direction: column; gap: 16px; }
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px; }
+.card {
+  display: flex; flex-direction: column; gap: 2px; padding: 12px 14px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.card-label { font-size: 0.82em; color: var(--muted); }
+.card-value { font-size: 1.4rem; font-weight: 650; font-variant-numeric: tabular-nums; }
+.card-note { font-size: 0.78em; color: var(--muted); }
+.card-bad .card-value { color: var(--danger); }
+.chart .bar { fill: var(--chart-b); }
+.chart .bar-oom { fill: var(--danger); }
+.chart .limit { stroke: var(--danger); stroke-width: 1.5; stroke-dasharray: 5 4; }
+.section-hint { margin: -6px 0 0; font-size: 0.88em; }
+.conversations-table .prompt { max-width: 340px; min-width: 200px; }
+.detail-row > td { padding: 0 0 12px; background: transparent; }
+.chart .conv-group { cursor: pointer; }
+.chart .conv-band { fill: var(--surface-2); opacity: 0.6; }
+.chart .conv-group:hover .conv-band { opacity: 1; }
+.chart .conv-label { fill: var(--text); font-size: 12px; font-weight: 600; }
+.chart .move-mark { fill: var(--good); font-size: 11px; font-weight: 600; }
+.chart .rewrite-label { fill: #e0a030; font-weight: 600; }
+.chart .move-arrow { fill: none; stroke: var(--good); stroke-width: 1.5; stroke-dasharray: 3 3; }
+.chart .bar-faded { opacity: 0.25; }
+.chart .bar-selected .conv-band { opacity: 1; stroke: var(--border); }
+.nowrap { white-space: nowrap; }
+.meter { display: block; width: 90px; height: 4px; margin-top: 3px; background: var(--surface-2); border-radius: 2px; }
+.meter-fill { display: block; height: 100%; background: var(--chart-b); border-radius: 2px; }
+.meter-oom { background: var(--danger); }
+
+.section-title { margin: 8px 0 0; }
+.detail { display: flex; flex-direction: column; gap: 14px; }
+.detail-header { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.detail-header p { margin: 4px 0 0; font-size: 0.88em; }
+
+.lane { position: relative; height: 30px; background: var(--surface-2); border-radius: 6px; overflow: hidden; }
+.lane-phase {
+  position: absolute; top: 0; bottom: 0; display: flex; align-items: center; padding: 0 8px;
+  font-size: 0.78em; white-space: nowrap; overflow: hidden; border-right: 2px solid var(--surface);
+}
+.lane-phase span { overflow: hidden; text-overflow: ellipsis; }
+.lane-run { background: color-mix(in srgb, var(--chart-b) 35%, var(--surface)); }
+.lane-run-big { background: color-mix(in srgb, var(--good) 40%, var(--surface)); }
+.lane-moving { background: repeating-linear-gradient(45deg, color-mix(in srgb, #e0a030 45%, var(--surface)) 0 8px, color-mix(in srgb, #e0a030 25%, var(--surface)) 8px 16px); }
+
+.timeline { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; }
+.tl-item { display: grid; grid-template-columns: 64px 14px 1fr; gap: 10px; padding: 6px 0; position: relative; }
+.tl-item::before {
+  content: ''; position: absolute; left: 80px; top: 0; bottom: 0; width: 2px; background: var(--border);
+}
+.tl-time { font-size: 0.8em; color: var(--muted); text-align: right; font-variant-numeric: tabular-nums; padding-top: 2px; }
+.tl-dot { width: 12px; height: 12px; border-radius: 50%; margin-top: 4px; position: relative; z-index: 1; background: var(--muted); }
+.tl-body { min-width: 0; }
+.tl-title { font-weight: 600; font-size: 0.92em; }
+.tl-detail { font-size: 0.86em; color: var(--muted); display: flex; flex-direction: column; gap: 3px; overflow-wrap: anywhere; }
+.tl-detail code { background: var(--code-bg); padding: 2px 6px; border-radius: 4px; white-space: pre-wrap; color: var(--text); }
+.tl-meta { font-size: 0.95em; }
+.tl-user .tl-dot { background: var(--accent); }
+.tl-agent .tl-dot { background: var(--muted); }
+.tl-step .tl-dot { background: var(--chart-b); }
+.tl-sandbox .tl-dot { background: var(--chart-b); outline: 2px solid var(--surface-2); }
+.tl-move .tl-dot { background: #e0a030; }
+.tl-warn .tl-dot { background: #e0a030; }
+.tl-warn .tl-title { color: #e0a030; }
+.tl-good .tl-dot { background: var(--good); }
+.tl-bad .tl-dot { background: var(--danger); }
+.tl-bad .tl-title { color: var(--danger); }
+.meter-wide { width: 220px; height: 6px; }
 
 @media (max-width: 640px) {
   .kinds { grid-template-columns: 1fr; }

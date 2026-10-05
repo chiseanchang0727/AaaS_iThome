@@ -7,8 +7,9 @@ commands and moving files work the same whichever provider made it.
 
 import shlex
 from abc import ABC, abstractmethod
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from typing import Any, ClassVar
 
@@ -18,6 +19,17 @@ from pydantic import BaseModel, ConfigDict
 
 class SandboxSetupError(RuntimeError):
     """A new sandbox could not be prepared, e.g. a package failed to install."""
+
+
+@dataclass(frozen=True)
+class FoundSandbox:
+    """A sandbox that exists at the provider, found by its labels."""
+
+    id: str
+    labels: dict[str, str] = field(default_factory=dict)
+    state: str = ""
+    handle: Any = None
+    """The provider's own object for it, for `delete_found`."""
 
 
 class ProviderOptions(BaseModel):
@@ -39,9 +51,16 @@ class SandboxProvider(ABC):
     Options: ClassVar[type[ProviderOptions]] = ProviderOptions
     """Schema for `sandbox.options`; unknown keys are rejected."""
 
-    def __init__(self, options: dict[str, Any] | None = None, packages: Iterable[str] = ()) -> None:
+    def __init__(
+        self,
+        options: dict[str, Any] | None = None,
+        packages: Iterable[str] = (),
+        labels: Mapping[str, str] | None = None,
+    ) -> None:
         self.options = self.Options.model_validate(options or {})
         self.packages = list(packages)
+        self.labels = dict(labels or {})
+        """Put on every sandbox `create` makes, if the provider supports labels."""
 
     @abstractmethod
     def create(self) -> SandboxBackendProtocol:
@@ -50,6 +69,36 @@ class SandboxProvider(ABC):
     @abstractmethod
     def destroy(self, sandbox: SandboxBackendProtocol) -> None:
         """Tear down a sandbox from `create`. Must not raise if already gone."""
+
+    default_memory_gb: ClassVar[int] = 1
+    """Memory of a sandbox from `create`, for the server's memory budget."""
+
+    def create_bigger(self, memory_gb: int, cpu: int) -> SandboxBackendProtocol:
+        """Start a sandbox with this much memory and CPU, for work the default
+        size cannot hold. Providers that cannot size sandboxes raise
+        NotImplementedError."""
+        raise NotImplementedError
+
+    def find(self, labels: Mapping[str, str]) -> list[FoundSandbox]:
+        """Every sandbox at the provider carrying all of `labels`, ours or not.
+
+        Providers that cannot list return []: nothing is found, nothing deleted.
+        """
+        return []
+
+    def delete_found(self, found: FoundSandbox) -> None:
+        """Delete a sandbox from `find`."""
+        raise NotImplementedError
+
+    def is_alive(self, sandbox: SandboxBackendProtocol) -> bool:
+        """Does the sandbox still run commands? A cheap round trip.
+
+        Providers with a status API can override this with something cheaper.
+        """
+        try:
+            return sandbox.execute("true").exit_code == 0
+        except Exception:
+            return False
 
     def prepare(self, sandbox: SandboxBackendProtocol) -> None:
         """Get a new sandbox ready: install `packages`. Same for every provider.
@@ -80,6 +129,42 @@ class SandboxProvider(ABC):
             yield sandbox
         finally:
             self.destroy(sandbox)
+
+
+def make_dirs(sandbox: SandboxBackendProtocol, *dirs: PurePosixPath) -> None:
+    """Create folders the agent is told to use, so its first write to them works."""
+    made = sandbox.execute("mkdir -p " + " ".join(shlex.quote(str(d)) for d in dirs))
+    if made.exit_code != 0:
+        raise SandboxSetupError(f"could not create {', '.join(map(str, dirs))}: {made.output.strip()[-300:]}")
+
+
+WORK_ARCHIVE = "/tmp/aaas-work.tgz"
+
+
+def copy_work_dir(old: SandboxBackendProtocol, new: SandboxBackendProtocol, work_dir: PurePosixPath) -> int:
+    """Copy `work_dir` (scripts, exported data, outputs) from one sandbox to another. Bytes moved.
+
+    One tar archive, so it is a single download and upload. Caches and
+    user-installed packages are left out: the new sandbox installs its own.
+    """
+    packed = old.execute(
+        f"tar czf {WORK_ARCHIVE} --exclude=./.cache --exclude=./.local -C {shlex.quote(str(work_dir))} ."
+    )
+    if packed.exit_code != 0:
+        raise SandboxSetupError(f"could not pack {work_dir}: {packed.output.strip()[-300:]}")
+    [archive] = old.download_files([WORK_ARCHIVE])
+    if archive.error or archive.content is None:
+        raise SandboxSetupError(f"could not download {WORK_ARCHIVE}: {archive.error}")
+    [uploaded] = new.upload_files([(WORK_ARCHIVE, archive.content)])
+    if uploaded.error:
+        raise SandboxSetupError(f"could not upload {WORK_ARCHIVE}: {uploaded.error}")
+    unpacked = new.execute(
+        f"mkdir -p {shlex.quote(str(work_dir))} && tar xzf {WORK_ARCHIVE} -C {shlex.quote(str(work_dir))}"
+        f" && rm -f {WORK_ARCHIVE}"
+    )
+    if unpacked.exit_code != 0:
+        raise SandboxSetupError(f"could not unpack into {work_dir}: {unpacked.output.strip()[-300:]}")
+    return len(archive.content)
 
 
 def download_outputs(

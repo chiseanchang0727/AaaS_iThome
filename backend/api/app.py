@@ -6,6 +6,8 @@
     DELETE /api/conversations/{id}           end a conversation, delete its sandbox
     GET    /api/artifacts/{id}/{path}        a file the agent made
     GET    /api/health
+    GET    /api/sandboxes                    how many sandboxes exist, and what they are doing
+    GET    /api/load                         what the agent's code steps cost (api/load.py)
     ...plus the upload routes in api/datasets.py and the eval routes in api/evals.py
 """
 
@@ -16,17 +18,18 @@ import re
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path, PurePosixPath
 
-from fastapi import APIRouter, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from sandboxes import download_outputs
 
-from .conversations import ConversationManager
+from .conversations import DEFAULT_ACCOUNT, ConversationManager, NotYourConversation
 from .events import run_turn, sse
 from .history import HistoryStore
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_ACCOUNT = re.compile(r"^[a-z0-9_-]{1,64}$")
 
 ARTIFACT_HEADERS = {
     # The agent writes these files, so treat them as untrusted: served as their
@@ -35,6 +38,12 @@ ARTIFACT_HEADERS = {
     "Content-Security-Policy": "sandbox allow-scripts",
     "X-Content-Type-Options": "nosniff",
 }
+
+
+SANDBOX_REPLACED = (
+    "The sandbox for this conversation had stopped, so a new one was started. "
+    "Files from earlier messages are gone; the conversation itself is kept."
+)
 
 
 class ChatRequest(BaseModel):
@@ -50,7 +59,16 @@ def create_app(
     on_shutdown=None,
     routers: Sequence[APIRouter] = (),
     history: HistoryStore | None = None,
+    default_account: str = DEFAULT_ACCOUNT,
 ) -> FastAPI:
+    def account(x_account: str | None = Header(default=None)) -> str:
+        """Who the request is for: the X-Account header (no login yet), else the default."""
+        if x_account is None:
+            return default_account
+        if not _ACCOUNT.match(x_account):
+            raise HTTPException(400, "X-Account must be 1-64 lowercase letters, digits, _ or -")
+        return x_account
+
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI):
         async def reap_forever():
@@ -58,6 +76,7 @@ def create_app(
                 await asyncio.sleep(reap_every_seconds)
                 await manager.reap_idle()
 
+        manager.start()  # begin filling the warm sandbox pool
         reaper = asyncio.create_task(reap_forever())
         try:
             yield
@@ -75,36 +94,56 @@ def create_app(
     async def health():
         return {"ok": True}
 
+    @app.get("/api/sandboxes")
+    async def sandboxes(account: str = Depends(account)):
+        """How many sandboxes exist and what each is doing (see ConversationManager.status)."""
+        return {**manager.status(), "account": account}
+
     @app.post("/api/chat")
-    async def chat(request: ChatRequest):
+    async def chat(request: ChatRequest, account: str = Depends(account)):
         thread_id = request.thread_id or manager.new_id()
         existing = manager.get(thread_id)
+        if existing is not None and existing.account != account:
+            raise HTTPException(404, "no such conversation")
         if existing is not None and existing.lock.locked():
             raise HTTPException(409, "this conversation is still answering a message")
         return StreamingResponse(
-            _turn(thread_id, request.message),
+            _turn(thread_id, request.message, account),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
 
-    async def _turn(thread_id: str, message: str) -> AsyncIterator[str]:
+    async def _turn(thread_id: str, message: str, account: str) -> AsyncIterator[str]:
         yield sse({"type": "thread", "thread_id": thread_id})
         try:
-            conversation = await manager.get_or_create(thread_id)
+            conversation = await manager.get_or_create(thread_id, account)
+        except NotYourConversation:
+            yield sse({"type": "error", "message": "no such conversation"})
+            yield sse({"type": "done"})
+            return
         except Exception as e:
-            yield sse({"type": "error", "message": f"could not start a sandbox: {e}"})
+            yield sse({"type": "error", "message": f"could not start the conversation: {e}"})
             yield sse({"type": "done"})
             return
 
         async with conversation.lock:
             try:
-                log = history.start_turn(thread_id, message) if history is not None else None
+                log = history.start_turn(thread_id, message, account) if history is not None else None
                 on_message = log.record if log is not None else None
+                # This turn's log hears sandbox events from here on, including a
+                # replacement below; set the step hook after it, on the stand-in
+                # the agent will actually use.
+                conversation.on_event = log.record_event if log is not None else None
+                if await manager.ensure_sandbox(conversation):
+                    yield sse({"type": "notice", "message": SANDBOX_REPLACED})
+                if conversation.stand_in is not None:
+                    conversation.stand_in.on_step = log.record_step if log is not None else None
                 async for event in run_turn(conversation.agent, thread_id, message, on_message):
                     yield sse(event)
                 if conversation.sandbox is not None:
                     for event in await _collect_artifacts(conversation, thread_id):
                         yield sse(event)
+                manager.touch(conversation, sandbox_ok=True)
             except Exception as e:
                 yield sse({"type": "error", "message": str(e)})
             finally:
@@ -129,8 +168,11 @@ def create_app(
         return events
 
     @app.delete("/api/conversations/{thread_id}")
-    async def end_conversation(thread_id: str):
+    async def end_conversation(thread_id: str, account: str = Depends(account)):
         if not _ID.match(thread_id):
+            raise HTTPException(404)
+        conversation = manager.get(thread_id)
+        if conversation is not None and conversation.account != account:
             raise HTTPException(404)
         return {"closed": await manager.close(thread_id)}
 

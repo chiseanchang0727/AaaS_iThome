@@ -5,6 +5,11 @@
     {"id": "c07e…", "previous": "41ab…", "turn": 1, "role": "tool", "tool_call_id": "c1", "name": "query_database", "content": "...", "error": false, "ts": "..."}
     {"id": "5d19…", "previous": "c07e…", "turn": 1, "role": "assistant", "content": "Music has the most views: 4.2M.", "ts": "..."}
 
+A code step run in the sandbox also gets a line with what it cost (role
+`sandbox_step`: command, seconds, cpu_seconds, peak_memory_mb, ...), and what
+happens to the sandbox gets one too (role `sandbox_event`: ready, moved to a
+bigger one, ...); readers that rebuild messages skip both.
+
 Every line has a unique `id` and the `id` of the line before it, `previous`
 (null on the first line): the order survives without the file, e.g. as rows
 in a database.
@@ -21,6 +26,7 @@ be given instead. One line maps to one row when this moves to a database.
 import json
 import logging
 import os
+import threading
 import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime
@@ -35,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
-    return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
 class HistoryStore:
@@ -54,9 +60,16 @@ class HistoryStore:
         self.root = Path(root)
         self._clock = clock
         self._new_id = new_id
+        self._lock = threading.Lock()
+        """Lines can come from the event loop and from worker threads (sandbox
+        steps): one at a time, so lines and the `previous` chain stay whole."""
 
     def path(self, thread_id: str) -> Path:
         return self.root / f"{thread_id}.jsonl"
+
+    def thread_ids(self) -> list[str]:
+        """Every conversation with a history file."""
+        return sorted(p.stem for p in self.root.glob("*.jsonl")) if self.root.exists() else []
 
     def read(self, thread_id: str) -> list[dict[str, Any]]:
         """Every line of a conversation, oldest first. [] if it has none.
@@ -77,12 +90,12 @@ class HistoryStore:
                 logger.warning("skipping unreadable line %d of %s", number, path)
         return records
 
-    def start_turn(self, thread_id: str, message: str) -> "TurnLog":
-        """Write the user's message as the first line of a new turn."""
+    def start_turn(self, thread_id: str, message: str, account: str | None = None) -> "TurnLog":
+        """Write the user's message as the first line of a new turn, with whose it is."""
         records = self.read(thread_id)
         turn = max((r.get("turn", 0) for r in records), default=0) + 1
         log = TurnLog(self, thread_id, turn, previous=records[-1].get("id") if records else None)
-        log.write({"role": "user", "content": message})
+        log.write({"role": "user", "content": message, **({"account": account} if account else {})})
         return log
 
     def append(self, thread_id: str, record: dict[str, Any]) -> None:
@@ -112,11 +125,20 @@ class TurnLog:
         """The id of the last line written, which the next line points back to."""
 
     def write(self, fields: dict[str, Any]) -> None:
-        line_id = self.store._new_id()
-        self.store.append(self.thread_id, {
-            "id": line_id, "previous": self.previous, "turn": self.turn, **fields, "ts": self.store._clock(),
-        })
-        self.previous = line_id
+        with self.store._lock:
+            line_id = self.store._new_id()
+            self.store.append(self.thread_id, {
+                "id": line_id, "previous": self.previous, "turn": self.turn, **fields, "ts": self.store._clock(),
+            })
+            self.previous = line_id
+
+    def record_step(self, measure: Any) -> None:
+        """What a code step in the sandbox cost (sandboxes/metering.StepMeasure)."""
+        self.write({"role": "sandbox_step", **measure.to_dict()})
+
+    def record_event(self, event: str, fields: dict[str, Any]) -> None:
+        """Something that happened to the conversation's sandbox (api/conversations.py)."""
+        self.write({"role": "sandbox_event", "event": event, **fields})
 
     def record(self, message: BaseMessage) -> None:
         if isinstance(message, AIMessage):

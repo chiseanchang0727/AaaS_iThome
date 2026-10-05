@@ -9,7 +9,127 @@ export type ChatEvent =
   | { type: 'answer'; text: string }
   | { type: 'artifact'; name: string; url: string; kind: string }
   | { type: 'error'; message: string }
+  | { type: 'notice'; message: string }
   | { type: 'done' }
+
+/** Totals for a set of code steps (backend/api/load.py summarize). */
+export interface LoadSummary {
+  steps: number
+  conversations: number
+  run_seconds: number
+  cpu_seconds: number
+  overhead_seconds: number
+  peak_memory_mb: number | null
+  average_peak_memory_mb: number | null
+  out_of_memory: number
+  failed: number
+}
+
+/** One code step the agent ran in a sandbox. Times and memory are null when unmeasured. */
+export interface LoadStep {
+  conversation: string
+  account: string
+  turn: number
+  prompt: string
+  ts: string
+  command: string
+  exit_code: number | null
+  seconds: number | null
+  run_seconds: number | null
+  cpu_seconds: number | null
+  peak_memory_mb: number | null
+  memory_limit_mb: number | null
+  out_of_memory: boolean
+  /** What the step was: worked out from the log (backend/api/load.py step_roles). */
+  strategy?: StepStrategy
+  rewrite?: number
+}
+
+/** first try / a changed attempt after a kill / unchanged after a kill / after moving to a bigger sandbox */
+export type StepStrategy = 'first' | 'rewrite' | 'same code' | 'bigger sandbox'
+
+/** A conversation that ran code: what it cost and what happened to its sandbox. */
+export interface LoadConversation {
+  conversation: string
+  account: string
+  question: string
+  turns: number
+  steps: number
+  run_seconds: number
+  cpu_seconds: number
+  out_of_memory: number
+  upgrades: number
+  upgrade_failures: number
+  rewrites: number
+  /** How an out-of-memory kill ended; null when there was none. */
+  resolved_by: 'rewrite' | 'bigger sandbox' | 'not resolved' | null
+  peak_memory_mb: number | null
+  sandbox_gb: number | null
+  last: string
+}
+
+/** One moment of a conversation (backend/api/load.py timeline). */
+export type TimelineItem = { ts: string; turn: number } & (
+  | { kind: 'question'; text: string }
+  | { kind: 'action'; tool: string; detail: string }
+  | { kind: 'answer'; text: string }
+  | {
+      kind: 'step'
+      command: string
+      exit_code: number | null
+      seconds: number | null
+      run_seconds: number | null
+      cpu_seconds: number | null
+      peak_memory_mb: number | null
+      memory_limit_mb: number | null
+      out_of_memory: boolean
+      strategy?: StepStrategy
+      rewrite?: number
+    }
+  | { kind: 'event'; event: string; [field: string]: unknown }
+)
+
+/** GET /api/load/conversations/{id}. */
+export interface ConversationTimeline {
+  conversation: string
+  account: string
+  timeline: TimelineItem[]
+}
+
+/** GET /api/load. */
+export interface Load {
+  account: string | null
+  accounts: string[]
+  memory_limit_mb: number | null
+  summary: LoadSummary
+  per_account: Record<string, LoadSummary>
+  steps: LoadStep[]
+  conversations: LoadConversation[]
+}
+
+/** GET /api/sandboxes (ConversationManager.status). */
+export interface SandboxStatus {
+  enabled: boolean
+  provider: string | null
+  max: number | null
+  in_use: number
+  busy: number
+  idle: number
+  starting: number
+  warm: number
+  warming: number
+  waiting: number
+  idle_minutes: number
+  max_per_account: number | null
+  /** Per account: slots held, and its conversations' sandboxes by state. */
+  accounts: Record<string, { sandboxes: number; busy: number; idle: number; starting: number }>
+  /** The account this request was made as. */
+  account: string
+  memory_used_gb: number
+  max_memory_gb: number | null
+  /** Sandboxes moved to a bigger size after running out of memory. */
+  bigger: number
+}
 
 export interface Column {
   name: string

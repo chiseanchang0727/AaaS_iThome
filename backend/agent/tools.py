@@ -161,3 +161,25 @@ def make_list_datasets(registry: Registry, data_dir: PurePosixPath | None) -> Ba
         return json.dumps(entries, ensure_ascii=False)
 
     return list_datasets
+
+
+def make_request_bigger_sandbox(sandbox) -> BaseTool:
+    """A request_bigger_sandbox tool for `sandbox` (a sandboxes.LazySandbox).
+
+    Sync on purpose: LangChain runs sync tools in a worker thread, and the
+    move itself runs on the event loop, which an async tool would block.
+    """
+
+    @tool
+    def request_bigger_sandbox(reason: str) -> str:
+        """Move this conversation to a sandbox with more memory (e.g. 1 GB -> 4 GB).
+
+        Only for work that truly needs that much memory at once, and only after
+        a lighter approach (fewer columns, aggregate earlier, DuckDB, chunks,
+        sampling) was tried and also ran out of memory: asked earlier, it says
+        "Not yet". `reason`: one sentence on why the memory is needed. Files in
+        the work folder are copied over. Run the command again after.
+        """
+        return sandbox.request_bigger(reason)
+
+    return request_bigger_sandbox

@@ -1,5 +1,17 @@
+import { accountHeaders } from './account'
 import { SSEParser } from './sse'
-import type { ChatEvent, Dataset, DatasetKind, EvalRun, EvalRunInfo, HistoryLine, StagedUpload } from './types'
+import type {
+  ChatEvent,
+  Dataset,
+  DatasetKind,
+  EvalRun,
+  EvalRunInfo,
+  HistoryLine,
+  ConversationTimeline,
+  Load,
+  SandboxStatus,
+  StagedUpload,
+} from './types'
 
 /** An error the backend explained; `message` is fit to show the user. */
 export class ApiError extends Error {
@@ -41,7 +53,7 @@ export async function streamChat(
 ): Promise<void> {
   const response = await fetch('/api/chat', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: { 'Content-Type': 'application/json', ...accountHeaders() },
     body: JSON.stringify(threadId ? { message, thread_id: threadId } : { message }),
     signal,
   })
@@ -56,8 +68,20 @@ export async function streamChat(
   }
 }
 
+export async function getSandboxStatus(): Promise<SandboxStatus> {
+  return json(await fetch('/api/sandboxes', { headers: accountHeaders() }))
+}
+
+export async function getLoad(account: string | null): Promise<Load> {
+  return json(await fetch(account ? `/api/load?account=${encodeURIComponent(account)}` : '/api/load'))
+}
+
+export async function getConversationTimeline(id: string): Promise<ConversationTimeline> {
+  return json(await fetch(`/api/load/conversations/${encodeURIComponent(id)}`))
+}
+
 export async function endConversation(threadId: string): Promise<void> {
-  await fetch(`/api/conversations/${encodeURIComponent(threadId)}`, { method: 'DELETE' })
+  await fetch(`/api/conversations/${encodeURIComponent(threadId)}`, { method: 'DELETE', headers: accountHeaders() })
 }
 
 export async function uploadFile(file: File): Promise<StagedUpload> {

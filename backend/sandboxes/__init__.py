@@ -7,12 +7,15 @@
         download_outputs(sandbox, cfg.sandbox.output_dir, Path("reports/run-1"))
 """
 
+from collections.abc import Mapping
+
 from config import SandboxConfig
 
-from .base import ProviderOptions, SandboxProvider, SandboxSetupError, download_outputs
+from .base import FoundSandbox, ProviderOptions, SandboxProvider, SandboxSetupError, download_outputs
 from .daytona import DaytonaProvider
 
 __all__ = [
+    "FoundSandbox",
     "PROVIDERS",
     "ProviderOptions",
     "SandboxProvider",
@@ -27,8 +30,11 @@ PROVIDERS: dict[str, type[SandboxProvider]] = {
 """Every provider `sandbox.provider` can name. Add new ones here."""
 
 
-def get_provider(config: SandboxConfig) -> SandboxProvider | None:
-    """The provider `config` selects, with its options validated; None for "none"."""
+def get_provider(config: SandboxConfig, labels: Mapping[str, str] | None = None) -> SandboxProvider | None:
+    """The provider `config` selects, with its options validated; None for "none".
+
+    `labels` are added to `config.labels` on every sandbox it creates.
+    """
     if config.provider == "none":
         if config.options or config.packages:
             raise ValueError("sandbox.options or packages is set but sandbox.provider is none")
@@ -38,4 +44,6 @@ def get_provider(config: SandboxConfig) -> SandboxProvider | None:
     except KeyError:
         known = ", ".join(sorted(["none", *PROVIDERS]))
         raise ValueError(f"unknown sandbox provider {config.provider!r}; known: {known}") from None
-    return cls(config.options, config.packages)
+    provider = cls(config.options, config.packages)
+    provider.labels = {**config.labels, **(labels or {})}
+    return provider

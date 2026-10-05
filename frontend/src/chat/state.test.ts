@@ -62,6 +62,20 @@ describe('chatReducer', () => {
     expect(state.busy).toBe(false)
   })
 
+  it('keeps notices on the reply', () => {
+    const state = run(
+      chatReducer(initialState, { type: 'send', text: 'q' }),
+      { type: 'notice', message: 'The sandbox for this conversation had stopped' },
+      { type: 'answer', text: 'done' },
+      { type: 'done' },
+    )
+    expect(state.messages[1]).toMatchObject({
+      status: 'done',
+      text: 'done',
+      notices: ['The sandbox for this conversation had stopped'],
+    })
+  })
+
   it('marks a failed request and frees the input', () => {
     const state = chatReducer(chatReducer(initialState, { type: 'send', text: 'q' }), {
       type: 'failed',
