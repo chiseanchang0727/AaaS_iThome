@@ -67,9 +67,9 @@ function renderAt(path: string) {
 }
 
 describe('Evals', () => {
-  it('opens on the context sub-page', async () => {
+  it('has a context sub-page', async () => {
     mockFetch(backend([RUN]))
-    renderAt('/evals')
+    renderAt('/evals/context')
     expect(await screen.findByRole('heading', { name: 'Context management with Jev' })).toBeInTheDocument()
     const tab = screen.getByRole('link', { name: 'Context (Jev)' })
     expect(tab).toHaveAttribute('href', '/evals/context')

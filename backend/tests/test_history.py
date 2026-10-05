@@ -124,3 +124,14 @@ def test_to_messages_answers_a_call_left_without_a_result(tmp_path):
     *_, filler = to_messages(history.read("t1"))
     assert isinstance(filler, ToolMessage)
     assert (filler.tool_call_id, filler.status, filler.content) == ("c9", "error", UNANSWERED)
+
+
+def test_assistant_lines_keep_the_model_calls_token_counts(tmp_path):
+    history = store(tmp_path)
+    log = history.start_turn("t1", "go")
+    log.record(AIMessage("done", usage_metadata={"input_tokens": 5120, "output_tokens": 88, "total_tokens": 5208}))
+    log.record(AIMessage("no usage reported"))
+
+    _, with_usage, without = history.read("t1")
+    assert with_usage["usage"] == {"input_tokens": 5120, "output_tokens": 88}
+    assert "usage" not in without

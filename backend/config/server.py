@@ -29,6 +29,23 @@ class ServerConfig(BaseModel):
     """Where each conversation's history is written, one JSONL file per
     conversation (api/history.py)."""
 
+    context_filter: bool = False
+    """Send each turn only the earlier turns Jev picks from the history
+    (agent.context_filter's settings), instead of the whole conversation
+    through the agent's checkpointer. Needs agent.context_filter."""
+
+    eval_history_dir: Path = Path("evals/system/chat_history")
+    """Saved conversations the System eval page judges (its "Evaluate all
+    conversation history" button): <thread_id>.jsonl files in the history
+    format, and optionally artifacts/<thread_id>/ with the files each made.
+    Kept apart from history_dir, so the app's own conversations are not judged.
+    These are run with the whole conversation sent (no context filter)."""
+
+    eval_jev_history_dir: Path = Path("evals/system/jev_history")
+    """The same kind of files, for conversations run with Jev as the context
+    manager (context_filter). The Jev vs full page pairs each with the
+    conversation in eval_history_dir that asked the same questions."""
+
     sandbox_idle_minutes: float
     """A conversation's sandbox is deleted after this long without a message."""
 

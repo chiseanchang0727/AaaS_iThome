@@ -13,20 +13,26 @@
 
 import asyncio
 import contextlib
+import logging
 import mimetypes
 import re
+import time
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
+from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from sandboxes import download_outputs
 
 from .conversations import DEFAULT_ACCOUNT, ConversationManager, NotYourConversation
 from .events import run_turn, sse
-from .history import HistoryStore
+from .history import HistoryStore, to_messages
+
+logger = logging.getLogger(__name__)
 
 _ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 _ACCOUNT = re.compile(r"^[a-z0-9_-]{1,64}$")
@@ -60,7 +66,12 @@ def create_app(
     routers: Sequence[APIRouter] = (),
     history: HistoryStore | None = None,
     default_account: str = DEFAULT_ACCOUNT,
+    context: Any = None,
 ) -> FastAPI:
+    """The app. With `context` (an agent.context_filter.ContextFilter) and
+    `history`, each turn is sent only the earlier turns Jev picks from the
+    history, and the manager's agents must be built without a checkpointer.
+    Without it, the agent's checkpointer carries the whole conversation."""
     def account(x_account: str | None = Header(default=None)) -> str:
         """Who the request is for: the X-Account header (no login yet), else the default."""
         if x_account is None:
@@ -128,7 +139,9 @@ def create_app(
 
         async with conversation.lock:
             try:
+                earlier = history.read(thread_id) if context is not None and history is not None else None
                 log = history.start_turn(thread_id, message, account) if history is not None else None
+                start_with = await _pick_context(earlier, message, log) if earlier is not None else None
                 on_message = log.record if log is not None else None
                 # This turn's log hears sandbox events from here on, including a
                 # replacement below; set the step hook after it, on the stand-in
@@ -138,7 +151,7 @@ def create_app(
                     yield sse({"type": "notice", "message": SANDBOX_REPLACED})
                 if conversation.stand_in is not None:
                     conversation.stand_in.on_step = log.record_step if log is not None else None
-                async for event in run_turn(conversation.agent, thread_id, message, on_message):
+                async for event in run_turn(conversation.agent, thread_id, message, on_message, start_with):
                     yield sse(event)
                 if conversation.sandbox is not None:
                     for event in await _collect_artifacts(conversation, thread_id):
@@ -149,6 +162,25 @@ def create_app(
             finally:
                 manager.touch(conversation)
         yield sse({"type": "done"})
+
+    async def _pick_context(earlier: list[dict], message: str, log) -> list:
+        """The earlier turns Jev picks, then the message; recorded as a `context` line.
+
+        If Jev fails, every earlier turn is sent, as with a checkpointer.
+        """
+        started = time.monotonic()
+        turns = len({r.get("turn") for r in earlier if r.get("role") == "user"})
+        try:
+            start_with, picked = await context.build(earlier, message)
+            fields: dict[str, Any] = {"sent_turns": picked}
+        except Exception as e:
+            logger.warning("context filter failed; sending the whole conversation", exc_info=True)
+            start_with = [*to_messages(earlier), HumanMessage(message)]
+            fields = {"sent_turns": sorted({r["turn"] for r in earlier if r.get("role") == "user"}), "error": str(e)}
+        if log is not None:
+            log.write({"role": "context", **fields, "earlier_turns": turns,
+                       "seconds": round(time.monotonic() - started, 3)})
+        return start_with
 
     async def _collect_artifacts(conversation, thread_id: str) -> list[dict]:
         local = artifacts_dir / thread_id

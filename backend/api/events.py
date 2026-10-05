@@ -44,17 +44,19 @@ async def run_turn(
     thread_id: str,
     message: str,
     on_message: Callable[[BaseMessage], None] | None = None,
+    start_with: list[BaseMessage] | None = None,
 ) -> AsyncIterator[dict]:
     """Run one user message through `agent` in conversation `thread_id`.
 
     `on_message` sees every message the agent adds, unclipped, as it arrives.
+    `start_with` replaces the plain user message: the earlier turns to send
+    and the message, for an agent without a checkpointer (agent/context_filter.py).
     """
     config = {"configurable": {"thread_id": thread_id}, "recursion_limit": MAX_STEPS}
     answer = ""
+    messages = start_with if start_with is not None else [{"role": "user", "content": message}]
     try:
-        async for update in agent.astream(
-            {"messages": [{"role": "user", "content": message}]}, config, stream_mode="updates"
-        ):
+        async for update in agent.astream({"messages": messages}, config, stream_mode="updates"):
             for payload in update.values():
                 for m in _messages(payload):
                     if on_message is not None:
