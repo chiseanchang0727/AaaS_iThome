@@ -31,13 +31,15 @@ _REPORT = re.compile(rf"\n?{re.escape(MARKER)} (\{{[^\n]*\}})\n?")
 # A command killed by a signal (the out-of-memory killer sends SIGKILL) exits
 # 128+signal, as in a shell, and the report says which signal and what the
 # sandbox's memory limit is (cgroup v2 memory.max; absent where unlimited).
+# The program is often not bash itself (`python3 job.py 2>&1`): then bash
+# survives and exits 128+signal for it, which counts as the same kill.
 _WRAPPER = (
     "import base64,json,resource,subprocess,sys,time\n"
     "c=base64.b64decode(sys.argv[1]).decode()\n"
     "t=time.monotonic()\n"
     "r=subprocess.run(['bash','-c',c])\n"
     "u=resource.getrusage(resource.RUSAGE_CHILDREN)\n"
-    "sig=-r.returncode if r.returncode<0 else None\n"
+    "sig=-r.returncode if r.returncode<0 else r.returncode-128 if 128<r.returncode<=192 else None\n"
     "try:\n"
     " m=open('/sys/fs/cgroup/memory.max').read().strip();lim=round(int(m)/1048576) if m.isdigit() else None\n"
     "except OSError:\n"

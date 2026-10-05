@@ -91,6 +91,14 @@ def test_a_killed_step_exits_like_a_shell_and_says_why(tmp_path):
     assert "Killed (signal 9), most likely for using too much memory" in result.output
 
 
+def test_a_program_killed_under_the_shell_counts_as_killed_too(tmp_path):
+    # Not the shell itself: bash outlives the program and exits 128+9 for it,
+    # as for `python3 job.py 2>&1` in the sandbox.
+    result, m = run_measured(shell(tmp_path), "echo started; sh -c 'kill -9 $$'")
+    assert result.exit_code == 137 and m.signal == 9
+    assert "Killed (signal 9), most likely for using too much memory" in result.output
+
+
 def test_out_of_memory_is_named_only_near_the_limit():
     near = StepMeasure("x", 137, 1.0, peak_memory_mb=972, signal=9, memory_limit_mb=1024)
     far = StepMeasure("x", 137, 1.0, peak_memory_mb=50, signal=9, memory_limit_mb=1024)
