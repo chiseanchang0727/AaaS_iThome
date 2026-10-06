@@ -146,9 +146,10 @@ def copy_work_dir(old: SandboxBackendProtocol, new: SandboxBackendProtocol, work
 
     One tar archive, so it is a single download and upload. Caches and
     user-installed packages are left out: the new sandbox installs its own.
+    So is `.tmp`, where DuckDB spills: a killed step leaves its files there.
     """
     packed = old.execute(
-        f"tar czf {WORK_ARCHIVE} --exclude=./.cache --exclude=./.local -C {shlex.quote(str(work_dir))} ."
+        f"tar czf {WORK_ARCHIVE} --exclude=./.cache --exclude=./.local --exclude=./.tmp -C {shlex.quote(str(work_dir))} ."
     )
     if packed.exit_code != 0:
         raise SandboxSetupError(f"could not pack {work_dir}: {packed.output.strip()[-300:]}")

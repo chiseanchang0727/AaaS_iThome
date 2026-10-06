@@ -233,11 +233,232 @@ export interface HistoryLine {
   id?: string
   previous?: string | null
   turn: number
-  role: 'user' | 'assistant' | 'tool'
+  role: 'user' | 'assistant' | 'tool' | 'sandbox_step' | 'sandbox_event' | 'context'
   content: string
   tool_calls?: { id: string; name: string; args: Record<string, unknown> }[]
   tool_call_id?: string
   name?: string | null
   error?: boolean
   ts?: string
+}
+
+// --- the whole-system eval (backend/evals/system, api/evals.py) ---------------
+
+/** pass / fail / unknown, or judge_error when the judge call itself failed. */
+export type EvalStatus = 'pass' | 'fail' | 'unknown' | 'judge_error'
+
+export interface Judged {
+  status: EvalStatus
+  reason: string
+}
+
+export interface CodeCheck {
+  check: string
+  /** null: no code check exists for it. */
+  pass: boolean | null
+  evidence?: string[]
+}
+
+export interface CodeStep {
+  command: string
+  exit_code: number | null
+  seconds: number | null
+  peak_memory_mb: number | null
+  memory_limit_mb: number | null
+  out_of_memory: boolean
+  strategy: string | null
+}
+
+export interface SystemResult {
+  case_id: string
+  question: string
+  final_answer: string
+  stopped: boolean
+  stream_errors: string[]
+  artifacts: string[]
+  correct: Judged & { expected_values: { status: EvalStatus | null; found: string[]; missing: string[] } }
+  grounded: Judged & {
+    answer_values: string[]
+    observed_count: number
+    ungrounded_values: string[]
+    unsupported_claims: { claim: string; reason: string }[]
+  }
+  instruction_following: Judged & { checks: CodeCheck[] }
+  execution_strategy: Judged
+  tool_usage: {
+    tools: Record<string, number>
+    tool_calls: number
+    queries: number
+    exports: number
+    skill_reads: number
+    skills_read: string[]
+    code_executions: number
+  }
+  recovery: {
+    errors: { tool: string; args: string; result: string; next: 'changed' | 'identical' | 'none' }[]
+    retries: number
+    identical_retries: number
+    oom_events: number
+    oom_resolved_by: string | null
+    sandbox_moves: number
+    sandbox_events: string[]
+    code_steps: CodeStep[]
+  }
+  efficiency: {
+    steps: number
+    queries: number
+    skill_reads: number
+    code_executions: number
+    model_calls: number
+    input_tokens: number
+    output_tokens: number
+    total_tokens: number
+    runtime_seconds: number
+  }
+  /** Set when Jev chose the earlier turns sent (server.context_filter); null with the whole conversation. */
+  context?: { sent_turns: number[]; earlier_turns: number; seconds: number; error?: string } | null
+}
+
+export interface SystemCase {
+  id: string
+  question: string
+  setup: string[]
+  expected_values: Record<string, number | string>
+  required_tools: string[]
+  forbidden_tools: string[]
+  required_skills: string[]
+  required_outputs: string[]
+  expected_behavior: string
+  sandbox: boolean
+  note: string
+}
+
+export interface SystemSummary {
+  cases: number
+  correct: number
+  grounded: number
+  instruction_following: number
+  execution_strategy: number
+  judge_errors: number
+  total_tokens: number
+  runtime_seconds: number
+}
+
+/** One item of GET /api/evals/system/runs. */
+export interface SystemRunInfo {
+  id: string
+  created_at: string
+  model: string
+  judge_model: string | null
+  rejudged_from: string | null
+  cases: string[]
+  /** "cases": the eval cases, run through the app; "history": saved conversations, judged as they happened. */
+  source: 'cases' | 'history'
+  status: RunStatus
+  /** Results the run will have when done. */
+  total: number
+  summary: SystemSummary
+}
+
+export type RunStatus = 'running' | 'done' | 'failed'
+
+/** GET /api/evals/system/history-runs. */
+export interface HistoryRunPreview {
+  available: boolean
+  /** Where the conversations to evaluate are read from (server.eval_history_dir). */
+  folder: string | null
+  conversations: number
+  turns: number
+  /** Id of the history run in progress, if any. */
+  running: string | null
+}
+
+/** GET /api/evals/system/runs/{id}. */
+export interface SystemRun {
+  id: string
+  created_at: string
+  model: string
+  judge_model: string | null
+  sandbox: boolean
+  rejudged_from: string | null
+  source?: 'cases' | 'history'
+  status?: RunStatus
+  total?: number
+  error?: string
+  cases: SystemCase[]
+  results: SystemResult[]
+  summary: SystemSummary
+}
+
+// --- Jev vs full (backend/evals/system/compare.py, api/compare.py) ------------
+
+export interface VerdictTally {
+  pass: number
+  fail: number
+  /** unknown or judge error */
+  unknown: number
+}
+
+export interface SideSummary {
+  turns: number
+  correct: VerdictTally
+  grounded: VerdictTally
+  instruction_following: VerdictTally
+  execution_strategy: VerdictTally
+  steps: number
+  total_tokens: number
+  runtime_seconds: number
+  errors: number
+}
+
+export interface CompareSide {
+  thread: string
+  /** One per turn, in order. */
+  results: SystemResult[]
+  summary: SideSummary
+}
+
+/** The same questions, asked once with the full conversation and once with Jev. */
+export interface ComparePair {
+  id: string
+  questions: string[]
+  full: CompareSide
+  jev: CompareSide
+}
+
+export interface UnpairedConversation {
+  thread: string
+  questions: string[]
+}
+
+/** GET /api/evals/compare/runs/{id}. */
+export interface CompareRun {
+  id: string
+  created_at: string
+  judge_model: string | null
+  status: RunStatus
+  total: number
+  error?: string
+  unpaired: { full: UnpairedConversation[]; jev: UnpairedConversation[] }
+  pairs: ComparePair[]
+}
+
+/** One item of GET /api/evals/compare/runs. */
+export interface CompareRunInfo {
+  id: string
+  created_at: string
+  judge_model: string | null
+  status: RunStatus
+  total: number
+  pairs: number
+}
+
+/** GET /api/evals/compare/pairs. */
+export interface ComparePreview {
+  available: boolean
+  pairs: number
+  turns: number
+  only_full: number
+  only_jev: number
+  running: string | null
 }

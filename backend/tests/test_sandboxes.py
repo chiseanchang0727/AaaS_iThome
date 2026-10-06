@@ -428,12 +428,15 @@ def test_the_work_folder_is_copied_to_the_new_sandbox(tmp_path):
     (old.root / "work" / "script.py").write_text("print('hi')")
     (old.root / "work" / ".cache").mkdir()
     (old.root / "work" / ".cache" / "big").write_text("skip me")
+    (old.root / "work" / ".tmp").mkdir()  # DuckDB's spill files, left by a killed step
+    (old.root / "work" / ".tmp" / "duckdb_temp_storage.tmp").write_text("skip me")
 
     copy_work_dir(old, new, PurePosixPath("/work"))
 
     assert (new.root / "work" / "data" / "rows.parquet").read_bytes() == b"PAR1 rows"
     assert (new.root / "work" / "script.py").read_text() == "print('hi')"
     assert not (new.root / "work" / ".cache").exists()
+    assert not (new.root / "work" / ".tmp").exists()
     assert not (new.root / "tmp" / "aaas-work.tgz").exists()  # cleaned up
 
 

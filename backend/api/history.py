@@ -5,6 +5,9 @@
     {"id": "c07e…", "previous": "41ab…", "turn": 1, "role": "tool", "tool_call_id": "c1", "name": "query_database", "content": "...", "error": false, "ts": "..."}
     {"id": "5d19…", "previous": "c07e…", "turn": 1, "role": "assistant", "content": "Music has the most views: 4.2M.", "ts": "..."}
 
+An assistant line also carries the model call's token counts, when the model
+reported them: `"usage": {"input_tokens": 5120, "output_tokens": 88}`.
+
 A code step run in the sandbox also gets a line with what it cost (role
 `sandbox_step`: command, seconds, cpu_seconds, peak_memory_mb, ...), and what
 happens to the sandbox gets one too (role `sandbox_event`: ready, moved to a
@@ -147,6 +150,11 @@ class TurnLog:
                 fields["tool_calls"] = [
                     {"id": c["id"], "name": c["name"], "args": c["args"]} for c in message.tool_calls
                 ]
+            if usage := message.usage_metadata:
+                fields["usage"] = {
+                    "input_tokens": usage.get("input_tokens", 0),
+                    "output_tokens": usage.get("output_tokens", 0),
+                }
             self.write(fields)
         elif isinstance(message, ToolMessage):
             content = message.content

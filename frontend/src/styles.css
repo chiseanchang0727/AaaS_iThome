@@ -9,8 +9,15 @@
   --accent-text: #ffffff;
   --danger: #c2372b;
   --code-bg: #f3f3ef;
-  --chart-a: #9a9a92;
-  --chart-b: #2a6fdb;
+  /* Series colors, validated (dataviz validate_palette.js) on this surface:
+     a = full conversation / checkpointer, b = Jev. */
+  --chart-a: #eb6834;
+  --chart-b: #2a78d6;
+  /* Verdict colors: fixed in both modes, always shown with a written label. */
+  --status-pass: #0ca30c;
+  --status-fail: #d03b3b;
+  --status-judge-error: #fab219;
+  --status-unknown: #b4b4ad;
   --good: #1f8a4c;
   --radius: 10px;
   color-scheme: light;
@@ -31,8 +38,9 @@
     --accent-text: #0e1a2e;
     --danger: #f07a6e;
     --code-bg: #262624;
-    --chart-a: #8a8a84;
-    --chart-b: #6ea0f0;
+    --chart-a: #d95926;
+    --chart-b: #3987e5;
+    --status-unknown: #5e5e59;
     --good: #5cc98a;
     color-scheme: dark;
   }
@@ -245,6 +253,67 @@ td.arm-cell > * { margin-right: 8px; }
 .facts { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; margin: 0 0 8px; font-size: 0.88em; }
 .facts dt { color: var(--muted); }
 .facts dd { margin: 0; }
+
+/* whole-system eval */
+.case-detail { display: flex; flex-direction: column; gap: 12px; }
+.case-detail h3 { font-size: 0.95rem; margin: 12px 0 6px; }
+.case-detail .arm-detail > h3:first-child { margin-top: 0; }
+.reason { margin: 0 0 8px; }
+.plain-list { margin: 0; padding-left: 18px; }
+th.num-col, td.num-col { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.recovery-error p { margin: 8px 0 2px; }
+.history-run { display: flex; flex-direction: column; gap: 4px; align-self: flex-end; }
+.history-run .confirm { align-items: center; flex-wrap: wrap; max-width: 520px; font-size: 0.9em; }
+.history-run .error, .history-run .hint { margin: 0; font-size: 0.85em; max-width: 320px; }
+.progress { margin: 0; font-weight: 600; }
+.chip.jev { white-space: nowrap; border-color: var(--accent); }
+
+/* Jev vs full */
+table.compare thead th { text-align: center; white-space: nowrap; }
+table.compare thead th:first-child, table.compare thead th:last-child { text-align: left; }
+table.compare tr.sub th { font-weight: 500; font-size: 0.85em; padding-top: 0; }
+table.compare td { white-space: nowrap; }
+table.compare td.prompt { white-space: normal; }
+.compare-turn h3 { font-size: 0.95rem; margin: 4px 0 8px; }
+.compare-turn .question { font-weight: 500; }
+.side-label { margin: 0 0 4px; font-size: 0.85em; font-weight: 600; display: flex; align-items: center; }
+.verdict-marks { display: flex; flex-wrap: wrap; gap: 4px 12px; }
+
+/* overview */
+.overview-section { display: flex; flex-direction: column; gap: 10px; }
+.overview-section h2 { margin: 0; }
+.section-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap; }
+.small { font-size: 0.85em; margin: 0; }
+.check { display: inline-flex; align-items: center; gap: 6px; font-size: 0.9em; }
+.field.inline { flex-direction: row; align-items: center; gap: 8px; }
+.legend-row { display: flex; flex-wrap: wrap; gap: 14px; font-size: 0.85em; color: var(--muted); }
+.series-full { background: var(--chart-a); }
+.series-jev { background: var(--chart-b); }
+.status-pass { background: var(--status-pass); }
+.status-fail { background: var(--status-fail); }
+.status-unknown { background: var(--status-unknown); }
+.status-judge_error { background: var(--status-judge-error); }
+
+.verdict-bars { display: flex; flex-direction: column; gap: 10px; }
+.verdict-row { display: grid; grid-template-columns: 7.5em 1fr; gap: 2px 12px; align-items: center; }
+.verdict-label { font-weight: 600; font-size: 0.9em; }
+.stack { display: flex; gap: 2px; height: 16px; }
+.stack .segment { min-width: 4px; }
+.stack .segment:first-child { border-radius: 4px 0 0 4px; }
+.stack .segment:last-child { border-radius: 0 4px 4px 0; }
+.stack .segment:only-child { border-radius: 4px; }
+.verdict-counts { grid-column: 2; font-size: 0.82em; }
+
+.cost-bars { display: flex; flex-direction: column; gap: 4px; }
+.cost-row { display: grid; grid-template-columns: minmax(120px, 34%) 1fr; gap: 12px; align-items: center; font-size: 0.85em; }
+.cost-label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Bar widths are % of the content box; the padding keeps room for the value at the longest bar's tip. */
+.cost-track { display: flex; align-items: center; gap: 6px; min-width: 0; padding-right: 4.5em; }
+.cost-bar { height: 14px; min-width: 2px; border-radius: 0 4px 4px 0; flex: none; }
+.cost-value { font-variant-numeric: tabular-nums; color: var(--muted); white-space: nowrap; }
+@media (max-width: 600px) {
+  .cost-row { grid-template-columns: 1fr; gap: 2px; }
+}
 
 /* --- load ------------------------------------------------------------------ */
 

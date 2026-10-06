@@ -11,6 +11,12 @@ import type {
   Load,
   SandboxStatus,
   StagedUpload,
+  ComparePreview,
+  CompareRun,
+  CompareRunInfo,
+  HistoryRunPreview,
+  SystemRun,
+  SystemRunInfo,
 } from './types'
 
 /** An error the backend explained; `message` is fit to show the user. */
@@ -119,4 +125,46 @@ export async function getEvalRun(id: string): Promise<EvalRun> {
 export async function getEvalHistory(runId: string, conversation: string, arm: string, repeat = 1): Promise<HistoryLine[]> {
   const path = [runId, 'history', conversation, arm].map(encodeURIComponent).join('/')
   return json(await fetch(`/api/evals/context/runs/${path}?repeat=${repeat}`))
+}
+
+export async function listSystemRuns(): Promise<SystemRunInfo[]> {
+  return json(await fetch('/api/evals/system/runs'))
+}
+
+export async function getSystemRun(id: string): Promise<SystemRun> {
+  return json(await fetch(`/api/evals/system/runs/${encodeURIComponent(id)}`))
+}
+
+export async function getSystemHistory(runId: string, caseId: string): Promise<HistoryLine[]> {
+  return json(await fetch(`/api/evals/system/runs/${encodeURIComponent(runId)}/history/${encodeURIComponent(caseId)}`))
+}
+
+export async function getHistoryRunPreview(): Promise<HistoryRunPreview> {
+  return json(await fetch('/api/evals/system/history-runs'))
+}
+
+/** Start judging every saved conversation turn. Resolves with the new run's id once it has started. */
+export async function startHistoryRun(): Promise<{ id: string; total: number }> {
+  return json(await fetch('/api/evals/system/history-runs', { method: 'POST' }))
+}
+
+export async function getComparePreview(): Promise<ComparePreview> {
+  return json(await fetch('/api/evals/compare/pairs'))
+}
+
+export async function startCompareRun(): Promise<{ id: string }> {
+  return json(await fetch('/api/evals/compare/runs', { method: 'POST' }))
+}
+
+export async function listCompareRuns(): Promise<CompareRunInfo[]> {
+  return json(await fetch('/api/evals/compare/runs'))
+}
+
+export async function getCompareRun(id: string): Promise<CompareRun> {
+  return json(await fetch(`/api/evals/compare/runs/${encodeURIComponent(id)}`))
+}
+
+export async function getCompareHistory(runId: string, side: 'full' | 'jev', thread: string): Promise<HistoryLine[]> {
+  const path = [runId, 'history', side, thread].map(encodeURIComponent).join('/')
+  return json(await fetch(`/api/evals/compare/runs/${path}`))
 }
