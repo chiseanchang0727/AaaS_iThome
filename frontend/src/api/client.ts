@@ -1,6 +1,10 @@
 import { accountHeaders } from './account'
 import { SSEParser } from './sse'
 import type {
+  Analysis,
+  AnalysisRun,
+  AnalysisSummary,
+  SourceOption,
   ChatEvent,
   Dataset,
   DatasetKind,
@@ -167,4 +171,38 @@ export async function getCompareRun(id: string): Promise<CompareRun> {
 export async function getCompareHistory(runId: string, side: 'full' | 'jev', thread: string): Promise<HistoryLine[]> {
   const path = [runId, 'history', side, thread].map(encodeURIComponent).join('/')
   return json(await fetch(`/api/evals/compare/runs/${path}`))
+}
+
+export async function listAnalyses(): Promise<AnalysisSummary[]> {
+  return json(await fetch('/api/analyses'))
+}
+
+export async function getAnalysis(id: string): Promise<Analysis> {
+  return json(await fetch(`/api/analyses/${encodeURIComponent(id)}`))
+}
+
+/**
+ * Run a saved analysis again; resolves with the new run (status "running").
+ * `sources` reads other tables with the same columns: {"videos": "videos_ca"}.
+ */
+export async function runAnalysis(id: string, sources: Record<string, string> = {}): Promise<AnalysisRun> {
+  return json(
+    await fetch(`/api/analyses/${encodeURIComponent(id)}/runs`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sources }),
+    }),
+  )
+}
+
+export async function getAnalysisSources(id: string): Promise<SourceOption[]> {
+  return json(await fetch(`/api/analyses/${encodeURIComponent(id)}/sources`))
+}
+
+export async function deleteAnalysis(id: string): Promise<void> {
+  await json(await fetch(`/api/analyses/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+}
+
+export function analysisOutputUrl(id: string, runId: string, file: string): string {
+  return `/api/analyses/${[id, 'runs', runId, 'files', file].map(encodeURIComponent).join('/')}`
 }

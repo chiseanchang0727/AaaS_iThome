@@ -315,6 +315,38 @@ table.compare td.prompt { white-space: normal; }
   .cost-row { grid-template-columns: 1fr; gap: 2px; }
 }
 
+/* --- analyses ------------------------------------------------------------ */
+
+.main:has(.analysis-list), .main:has(.script) { max-width: 1240px; }
+.analysis-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.analysis-row { position: relative; }
+.analysis-row .analysis-card { padding-right: 44px; }
+.analysis-row:has(.row-confirm) .analysis-card { padding-right: 150px; }
+/* The × sits in the card's top-right corner, quiet until hovered. */
+.icon-button {
+  position: absolute; top: 8px; right: 8px; width: 28px; height: 28px; padding: 0;
+  display: grid; place-items: center; font-size: 18px; line-height: 1;
+  background: transparent; border: 0; border-radius: 6px; color: var(--muted); cursor: pointer;
+}
+.icon-button:hover, .icon-button:focus-visible { background: var(--surface-2); color: var(--danger); }
+.row-confirm { position: absolute; top: 8px; right: 10px; display: flex; align-items: center; gap: 8px; }
+button.small { padding: 3px 10px; font-size: 0.85em; }
+.link-button { background: none; border: 0; padding: 0; color: var(--muted); font: inherit; font-size: 0.85em; cursor: pointer; }
+.link-button:hover { color: var(--text); text-decoration: underline; }
+.analysis-card {
+  display: flex; flex-direction: column; gap: 2px; padding: 12px 14px; text-decoration: none; color: var(--text);
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.analysis-card:hover { background: var(--surface-2); }
+.analysis-title { font-weight: 600; }
+.analysis-meta { font-size: 0.85em; color: var(--muted); }
+.overview-section h3 { font-size: 0.95rem; margin: 6px 0 0; }
+pre.script { max-height: 480px; }
+.saved-analysis {
+  margin: 8px 0 0; padding: 8px 12px; border-radius: 8px; font-size: 0.92em;
+  background: var(--surface-2); border: 1px solid var(--border);
+}
+
 /* --- load ------------------------------------------------------------------ */
 
 .main:has(.load-page) { max-width: 1240px; }

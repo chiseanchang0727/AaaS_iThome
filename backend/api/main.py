@@ -7,10 +7,14 @@ import uuid
 from pathlib import Path
 
 from config import cfg
-from datasources import close_database
+from datasources import close_database, query_database
+from agent import export_rows
+from agent.save_analysis import dataset_reader
+from analyses import AnalysisStore
 from evals.system.judges import Judges
 from sandboxes import get_provider
 
+from .analyses import analyses_router
 from .app import create_app
 from .compare import compare_router
 from .datasets import datasets_router
@@ -49,6 +53,12 @@ app = create_app(
             make_judges=lambda: Judges(cfg.agent.model),
         ),
         load_router(history),
+        analyses_router(
+            AnalysisStore(cfg.server.analyses_dir), manager,
+            query=export_rows, query_rows=lambda sql: query_database(sql, raw=True),
+            read_dataset=dataset_reader(store.registry, cfg.server.uploads_dir / "files"),
+            work_dir=cfg.sandbox.data_dir.parent, account=cfg.server.default_account,
+        ),
     ],
     history=history,
     default_account=cfg.server.default_account,

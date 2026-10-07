@@ -18,9 +18,13 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from config import cfg
 from datasets import Registry
 
+from analyses import AnalysisStore
+from datasources import query_database as _query_database
+
 from .middleware import SkillEnforcerMiddleware
+from .save_analysis import dataset_reader, make_analysis_readers, make_save_analysis
 from .skill_router import SkillRouterMiddleware, build_classifier
-from .tools import make_export_query, make_list_datasets, make_request_bigger_sandbox, query_database
+from .tools import make_export_query, make_list_datasets, make_request_bigger_sandbox, query_database, to_parquet
 
 __all__ = ["build_agent", "SYSTEM_PROMPT", "SANDBOX_PROMPT"]
 
@@ -69,6 +73,12 @@ each as interactive HTML, which the user sees rendered in the chat:
 
 export_query does not show you the rows, and you cannot see charts. When you
 compute something in the sandbox, print the numbers and facts you will report.
+
+A script gets all its data from files, never from you. Do not type values you
+saw in a result into a script (`counts = [904, 1365, ...]`, a list of channels
+or dates taken from a query): export those rows with export_query and read the
+file. Then the chart stays right when the data changes, and the analysis can be
+saved with save_analysis and run again later.
 """
 
 
@@ -82,6 +92,11 @@ def touches_videos(tool_call: dict) -> bool:
     comment, which only means the skill gets read when it wasn't needed.
     """
     return bool(_VIDEOS.search(str(tool_call.get("args", {}).get("sql", ""))))
+
+
+async def export_rows(sql: str) -> bytes:
+    """A query's rows as a Parquet file, as export_query saves them."""
+    return to_parquet(await _query_database(sql, max_rows=cfg.sandbox.export_max_rows, raw=True))
 
 
 def skill_router() -> SkillRouterMiddleware | None:
@@ -120,7 +135,8 @@ def build_agent(
     )
     registry = Registry(cfg.server.uploads_dir / "registry.json")
     data_dir = cfg.sandbox.data_dir if sandbox is not None else None
-    tools = [query_database, make_list_datasets(registry, data_dir)]
+    analyses = AnalysisStore(cfg.server.analyses_dir)
+    tools = [query_database, make_list_datasets(registry, data_dir), *make_analysis_readers(analyses)]
     system_prompt = SYSTEM_PROMPT
     if sandbox is not None:
         tools.append(
@@ -131,6 +147,11 @@ def build_agent(
         )
         if hasattr(sandbox, "request_bigger"):  # the API's stand-in, which can move sandboxes
             tools.append(make_request_bigger_sandbox(sandbox))
+        tools.append(make_save_analysis(
+            sandbox, analyses,
+            query=export_rows, read_dataset=dataset_reader(registry, cfg.server.uploads_dir / "files"),
+            work_dir=cfg.sandbox.data_dir.parent,
+        ))
 
     middleware = []
     if router := skill_router():
