@@ -462,3 +462,64 @@ export interface ComparePreview {
   only_jev: number
   running: string | null
 }
+
+// --- saved analyses (backend/analyses, api/analyses.py) ------------------------
+
+export interface AnalysisRun {
+  id: string
+  started_at: string
+  status: 'running' | 'done' | 'failed'
+  /** "save": the test run when it was saved; "run": someone clicked Run. */
+  trigger: 'save' | 'run'
+  seconds: number | null
+  outputs: string[]
+  error: string | null
+  log: string
+  notes: string[]
+  /** Tables this run read instead of the recipe's: {"videos": "videos_ca"}. Empty: the recipe's own. */
+  sources: Record<string, string>
+  /** The recipe version it ran. */
+  version: number
+}
+
+/** GET /api/analyses/{id}/sources: for one table the recipe reads, the tables that could stand in. */
+export interface SourceOption {
+  table: string
+  candidates: { name: string; ok: boolean; problems: string[] }[]
+}
+
+export type AnalysisInput = { kind: 'query'; sql: string; file: string } | { kind: 'dataset'; name: string }
+
+/** One item of GET /api/analyses. */
+export interface AnalysisSummary {
+  id: string
+  title: string
+  description: string
+  question: string
+  created_at: string
+  version: number
+  updated_at: string | null
+  outputs: string[]
+  last_run: AnalysisRun | null
+  last_good_run: AnalysisRun | null
+}
+
+/** GET /api/analyses/{id}: the recipe and its runs, newest first. */
+export interface Analysis {
+  id: string
+  title: string
+  description: string
+  question: string
+  conversation: string | null
+  created_at: string
+  /** 1 when first saved; each change the agent saves over it adds one. */
+  version: number
+  updated_at: string | null
+  inputs: AnalysisInput[]
+  script: string
+  outputs: { file: string; format: 'html' }[]
+  /** The tables its queries read. */
+  sources: string[]
+  runs: AnalysisRun[]
+  running: boolean
+}

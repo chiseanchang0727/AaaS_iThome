@@ -229,6 +229,8 @@ uploads/
 
 # Conversation history (one JSONL file per conversation)
 conversations/
+# Saved analyses and their runs' outputs (backend/saved_analyses, server.analyses_dir)
+saved_analyses/
 
 # Article drafts, kept locally
 articles/

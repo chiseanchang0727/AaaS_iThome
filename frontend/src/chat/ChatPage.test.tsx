@@ -1,5 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { jsonResponse, mockFetch, sseResponse, type Call } from '../test/fetch'
@@ -107,5 +108,50 @@ describe('ChatPage', () => {
     await userEvent.type(screen.getByLabelText('Message'), 'line one{Shift>}{Enter}{/Shift}line two')
     expect(chatCalls(calls)).toHaveLength(0)
     expect(screen.getByLabelText('Message')).toHaveValue('line one\nline two')
+  })
+
+  it('links to an analysis the agent saved', async () => {
+    mockFetch(() => sseResponse([
+      { type: 'thread', thread_id: 'thread-1' },
+      { type: 'tool_call', id: 's1', name: 'save_analysis', args: { title: 'Videos per month' } },
+      { type: 'tool_result', id: 's1', name: 'save_analysis', content: 'Saved analysis ab12cd34ef56: "Videos per month". Its test run made chart.html in 9s.', error: false },
+      { type: 'answer', text: 'Saved.' },
+      { type: 'done' },
+    ]))
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
+    await ask('save this analysis')
+
+    const link = await screen.findByRole('link', { name: 'Open it in Analyses' })
+    expect(link).toHaveAttribute('href', '/analyses/ab12cd34ef56')
+    expect(link.closest('p')).toHaveTextContent('✓ Saved “Videos per month”.')
+  })
+
+  it('shows no link when saving failed', async () => {
+    mockFetch(() => sseResponse([
+      { type: 'thread', thread_id: 'thread-1' },
+      { type: 'tool_call', id: 's1', name: 'save_analysis', args: { title: 'x' } },
+      { type: 'tool_result', id: 's1', name: 'save_analysis', content: 'NOT SAVED. Fix the recipe', error: false },
+      { type: 'answer', text: 'It failed.' },
+      { type: 'done' },
+    ]))
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
+    await ask('save this analysis')
+    await screen.findByText('It failed.')
+    expect(screen.queryByRole('link', { name: 'Open it in Analyses' })).not.toBeInTheDocument()
+  })
+
+  it('says when the agent changed a saved analysis instead of adding one', async () => {
+    mockFetch(() => sseResponse([
+      { type: 'thread', thread_id: 'thread-1' },
+      { type: 'tool_call', id: 's1', name: 'save_analysis', args: { title: 'Views per category' } },
+      { type: 'tool_result', id: 's1', name: 'save_analysis', content: 'Updated analysis ab12cd34ef56 to version 2: "Views per category". Its test run made r.html in 7s.', error: false },
+      { type: 'answer', text: 'Done.' },
+      { type: 'done' },
+    ]))
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
+    await ask('remove the table')
+    const link = await screen.findByRole('link', { name: 'Open it in Analyses' })
+    expect(link).toHaveAttribute('href', '/analyses/ab12cd34ef56')
+    expect(link.closest('p')).toHaveTextContent('✓ Updated “Views per category” to version 2.')
   })
 })

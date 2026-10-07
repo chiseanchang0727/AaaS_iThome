@@ -1,5 +1,6 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router'
 
+import { AnalysesPage } from './analyses/AnalysesPage'
 import { ChatPage } from './chat/ChatPage'
 import { getAccount } from './api/account'
 import { DataPage } from './data/DataPage'
@@ -13,6 +14,7 @@ export default function App() {
         <span className="brand">AaaS iThome</span>
         <NavLink to="/chat">Chat</NavLink>
         <NavLink to="/data">Data</NavLink>
+        <NavLink to="/analyses">Analyses</NavLink>
         <NavLink to="/evals">Evals</NavLink>
         <NavLink to="/load">Load</NavLink>
         <span className="account" title="No login yet: requests are sent as this account">
@@ -23,6 +25,7 @@ export default function App() {
         <Routes>
           <Route path="/chat" element={<ChatPage />} />
           <Route path="/data" element={<DataPage />} />
+          <Route path="/analyses/*" element={<AnalysesPage />} />
           <Route path="/evals/*" element={<EvalsPage />} />
           <Route path="/load" element={<LoadPage />} />
           <Route path="*" element={<Navigate to="/chat" replace />} />
