@@ -4,6 +4,7 @@ import type {
   Analysis,
   AnalysisRun,
   AnalysisSummary,
+  AnalysisVersion,
   SourceOption,
   ChatEvent,
   Dataset,
@@ -19,6 +20,8 @@ import type {
   CompareRun,
   CompareRunInfo,
   HistoryRunPreview,
+  PastConversation,
+  PastConversationSummary,
   SystemRun,
   SystemRunInfo,
 } from './types'
@@ -195,6 +198,23 @@ export async function runAnalysis(id: string, sources: Record<string, string> = 
   )
 }
 
+/** Ask the agent for a version that fits, after a run that broke a limit. */
+export async function optimizeRun(id: string, runId: string): Promise<AnalysisRun> {
+  const path = [id, 'runs', runId, 'optimize'].map(encodeURIComponent).join('/')
+  return json(await fetch(`/api/analyses/${path}`, { method: 'POST' }))
+}
+
+/** Every version of an analysis's recipe, oldest first; the last is the current one. */
+export async function getAnalysisVersions(id: string): Promise<AnalysisVersion[]> {
+  return json(await fetch(`/api/analyses/${encodeURIComponent(id)}/versions`))
+}
+
+/** What the agent was asked and did in one optimization of an analysis (its conversation's lines). */
+export async function getOptimizationTranscript(id: string, conversation: string): Promise<HistoryLine[]> {
+  const path = [id, 'optimizations', conversation].map(encodeURIComponent).join('/')
+  return json(await fetch(`/api/analyses/${path}`))
+}
+
 export async function getAnalysisSources(id: string): Promise<SourceOption[]> {
   return json(await fetch(`/api/analyses/${encodeURIComponent(id)}/sources`))
 }
@@ -205,4 +225,17 @@ export async function deleteAnalysis(id: string): Promise<void> {
 
 export function analysisOutputUrl(id: string, runId: string, file: string): string {
   return `/api/analyses/${[id, 'runs', runId, 'files', file].map(encodeURIComponent).join('/')}`
+}
+
+export async function listPastConversations(): Promise<PastConversationSummary[]> {
+  return json(await fetch('/api/conversations', { headers: accountHeaders() }))
+}
+
+export async function getPastConversation(id: string): Promise<PastConversation> {
+  return json(await fetch(`/api/conversations/${encodeURIComponent(id)}`, { headers: accountHeaders() }))
+}
+
+/** Delete a saved conversation for good: its history and the files it made. */
+export async function deletePastConversation(id: string): Promise<void> {
+  await json(await fetch(`/api/conversations/${encodeURIComponent(id)}/history`, { method: 'DELETE', headers: accountHeaders() }))
 }

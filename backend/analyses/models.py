@@ -62,12 +62,73 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+class InputMeasure(BaseModel):
+    """What one input cost, or would cost: how much data crossed from the database into the sandbox."""
+
+    file: str
+    tables: list[str] = []
+    """The tables it read, after any swap."""
+    estimated_rows: int | None = None
+    estimated_bytes: int | None = None
+    """The planner's estimate (EXPLAIN), before anything ran."""
+    counted_rows: int | None = None
+    """The rows the query really returns, counted in the database without moving them. Made
+    only when the estimate is over a limit: EXPLAIN can be far off, e.g. it assumes about as many
+    groups as rows for GROUP BY on an expression (EXTRACT(HOUR FROM ...)) it has no statistics for."""
+    rows: int | None = None
+    bytes: int | None = None
+    """What was actually exported: rows and Parquet size."""
+    query_seconds: float | None = None
+
+
+class SandboxMeasure(BaseModel):
+    """What the script cost in the sandbox (sandboxes/metering.py)."""
+
+    seconds: float | None = None
+    cpu_seconds: float | None = None
+    peak_memory_mb: float | None = None
+    memory_limit_mb: int | None = None
+    killed: bool = False
+    """Killed by SIGKILL: almost always out of memory."""
+
+
+class Measurements(BaseModel):
+    inputs: list[InputMeasure] = []
+    sandbox: SandboxMeasure | None = None
+
+
+class Finding(BaseModel):
+    """A limit a run exceeded, and where the problem is (analyses/budget.py)."""
+
+    limit: Literal["hard", "soft"]
+    """hard: the run cannot go on safely; soft: it works, but an optimization is worth it."""
+    kind: Literal["data_movement", "sandbox_memory", "sandbox_runtime"]
+    reason: str
+
+
+class OptimizationNote(BaseModel):
+    """Why a version exists: it was rewritten because the previous one no longer fit its data."""
+
+    from_version: int
+    kind: Literal["data_movement", "sandbox_memory", "sandbox_runtime"]
+    reason: str
+    sources: dict[str, str] = {}
+    """The tables it was optimized for, e.g. {"events": "events_enterprise"}."""
+    run: str | None = None
+    """The run that found the problem."""
+    conversation: str | None = None
+    """The agent conversation that rewrote it."""
+    results_check: str | None = None
+    """How its results were checked against the version before, on the saved tables, when it was saved."""
+
+
 class RunRecord(BaseModel):
     """One run of a saved analysis: how it went, and which output files it made."""
 
     id: str
     started_at: str
-    status: Literal["running", "done", "failed"]
+    status: Literal["running", "done", "failed", "needs_optimization"]
+    """needs_optimization: a hard limit stopped it (findings say which); nothing ran past that point."""
     trigger: Literal["save", "run"]
     """"save": the test run when it was saved; "run": someone clicked Run."""
     seconds: float | None = None
@@ -81,6 +142,14 @@ class RunRecord(BaseModel):
     """Tables this run read instead of the recipe's: {"videos": "videos_ca"}. Empty: the recipe's own."""
     version: int = 1
     """The recipe version it ran."""
+    measurements: Measurements | None = None
+    findings: list[Finding] = []
+    """Limits it exceeded: hard ones stop it, soft ones recommend an optimization."""
+    optimization: dict | None = None
+    """For a run that needed one: {"status": "running" | "done" | "failed", "conversation", "new_version",
+    "message"}."""
+    optimized_from: int | None = None
+    """Set on the run made right after an optimization: the version it replaced."""
 
 
 class Analysis(BaseModel):
@@ -95,6 +164,8 @@ class Analysis(BaseModel):
     """1 when first saved; each change saved over it (save_analysis `replaces`) adds one."""
     updated_at: str | None = None
     """When the current version was saved, if it is not the first."""
+    optimization: OptimizationNote | None = None
+    """Set when this version was saved by an optimization: why it exists."""
     inputs: list[Input]
     script: str
     outputs: list[Output]

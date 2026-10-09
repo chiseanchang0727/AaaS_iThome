@@ -95,3 +95,13 @@ server:
   # count toward max_sandboxes and are billed while they wait. 0: off.
   warm_sandboxes: 1
   max_upload_mb: 50
+
+analysis_execution:
+  # When a saved analysis's strategy no longer fits its data (analyses/budget.py).
+  # Hard limits stop a run and ask for an optimization; soft ones recommend it.
+  # The hard row limit is sandbox.export_max_rows, the hard query time database.timeout.
+  soft_export_rows: 50000
+  soft_export_mb: 20
+  max_export_mb: 200
+  soft_run_seconds: 120
+  memory_warning_ratio: 0.8

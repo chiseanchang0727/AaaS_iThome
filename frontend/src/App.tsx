@@ -1,7 +1,7 @@
 import { NavLink, Navigate, Route, Routes } from 'react-router'
 
 import { AnalysesPage } from './analyses/AnalysesPage'
-import { ChatPage } from './chat/ChatPage'
+import { ChatLayout } from './chat/ChatLayout'
 import { getAccount } from './api/account'
 import { DataPage } from './data/DataPage'
 import { EvalsPage } from './evals/EvalsPage'
@@ -23,7 +23,7 @@ export default function App() {
       </nav>
       <main className="main">
         <Routes>
-          <Route path="/chat" element={<ChatPage />} />
+          <Route path="/chat/*" element={<ChatLayout />} />
           <Route path="/data" element={<DataPage />} />
           <Route path="/analyses/*" element={<AnalysesPage />} />
           <Route path="/evals/*" element={<EvalsPage />} />

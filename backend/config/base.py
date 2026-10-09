@@ -6,6 +6,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict
 
 from .agent import AgentConfig
+from .analysis_execution import AnalysisExecutionConfig
 from .data import DataConfig
 from .database import DatabaseConfig
 from .sandbox import SandboxConfig
@@ -20,6 +21,7 @@ class Config(BaseModel):
     database: DatabaseConfig
     sandbox: SandboxConfig
     server: ServerConfig
+    analysis_execution: AnalysisExecutionConfig = AnalysisExecutionConfig()
 
     @classmethod
     def load(cls, path: Path | str = "config.yml") -> "Config":

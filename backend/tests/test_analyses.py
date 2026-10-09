@@ -239,14 +239,14 @@ def test_run_takes_a_sandbox_runs_it_and_gives_the_sandbox_back(tmp_path):
     assert provider.destroyed  # the run's sandbox was deleted after
 
 
-def test_a_run_killed_for_memory_tries_a_bigger_sandbox_once(tmp_path):
+def test_a_run_killed_for_memory_is_not_moved_to_a_bigger_sandbox_first(tmp_path):
+    """Rewriting the script comes first (test_adaptive_runs.py); the bigger sandbox only after that."""
     killed = SCRIPT + "import signal; os.kill(os.getpid(), signal.SIGKILL)"
     app, store, _ = app_for(tmp_path, recipe(script=killed))
     with TestClient(app) as client:
         record = wait_for(client, "abc123", client.post("/api/analyses/abc123/runs").json()["id"])
     assert record["status"] == "failed" and record["error"] == "it ran out of memory (killed)"
-    assert record["notes"] == ["No bigger sandbox is available. To fit, use less memory: select fewer columns, "
-                               "aggregate earlier, query the file with DuckDB, or sample."]
+    assert record["notes"] == [] and record["measurements"]["sandbox"]["killed"] is True
 
 
 def test_missing_things_are_404_and_delete_works(tmp_path):

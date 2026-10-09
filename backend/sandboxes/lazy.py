@@ -143,6 +143,10 @@ class LazySandbox(SandboxBackendProtocol):
         except Exception as e:
             raise SandboxUnavailable(f"no sandbox: {e}") from e
 
+    def real(self) -> SandboxBackendProtocol:
+        """The real sandbox (waiting for it to start), for callers that meter and recover on their own."""
+        return self._real()
+
     @staticmethod
     def _why(e: SandboxUnavailable) -> str:
         return f"Sandbox unavailable ({e}). Code and files can't be used for this; answer from the data you already have."

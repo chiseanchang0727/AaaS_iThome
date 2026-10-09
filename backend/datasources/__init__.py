@@ -9,7 +9,7 @@ from config import cfg
 
 from .postgres import PostgresSource, TooManyRows
 
-__all__ = ["PostgresSource", "TooManyRows", "query_database", "close_database"]
+__all__ = ["PostgresSource", "TooManyRows", "query_database", "estimate_query", "count_query", "close_database"]
 
 _source: PostgresSource | None = None
 _lock = asyncio.Lock()
@@ -35,6 +35,23 @@ async def query_database(query: str, max_rows: int | None = None, *, raw: bool =
     """
     source = await _get_source()
     return await source.query(query, max_rows, raw=raw)
+
+
+async def estimate_query(query: str) -> dict[str, int]:
+    """The planner's estimate for a read-only query, without running it: rows, width, bytes."""
+    source = await _get_source()
+    return await source.estimate(query)
+
+
+async def count_query(query: str) -> int:
+    """How many rows a read-only query really returns, counted in the database: one number comes back.
+
+    The database still does the query's work; only the count crosses the wire. Used when
+    EXPLAIN's estimate is over a limit, because the estimate can be far off (e.g. GROUP BY on
+    an expression the planner has no statistics for).
+    """
+    rows = await query_database(f"SELECT count(*) AS n FROM ({query.strip().rstrip(';')}) AS counted", raw=True)
+    return int(rows[0]["n"])
 
 
 async def close_database() -> None:

@@ -7,10 +7,11 @@ import uuid
 from pathlib import Path
 
 from config import cfg
-from datasources import close_database, query_database
+from datasources import close_database, count_query, estimate_query, query_database
 from agent import export_rows
 from agent.save_analysis import dataset_reader
 from analyses import AnalysisStore
+from analyses.budget import Limits
 from evals.system.judges import Judges
 from sandboxes import get_provider
 
@@ -58,6 +59,7 @@ app = create_app(
             query=export_rows, query_rows=lambda sql: query_database(sql, raw=True),
             read_dataset=dataset_reader(store.registry, cfg.server.uploads_dir / "files"),
             work_dir=cfg.sandbox.data_dir.parent, account=cfg.server.default_account,
+            estimate=estimate_query, count=count_query, limits=Limits.from_config(cfg),
         ),
     ],
     history=history,

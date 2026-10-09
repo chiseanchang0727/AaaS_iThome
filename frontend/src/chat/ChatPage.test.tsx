@@ -27,7 +27,7 @@ async function ask(text: string) {
 describe('ChatPage', () => {
   it('streams a turn: steps, markdown answer and chart', async () => {
     mockFetch(() => sseResponse(TURN))
-    render(<ChatPage />)
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await ask('Which category leads?')
 
     expect(await screen.findByText('Gaming', { selector: 'strong' })).toBeInTheDocument()
@@ -38,7 +38,7 @@ describe('ChatPage', () => {
 
   it('renders agent HTML in a sandboxed iframe that cannot reach the app', async () => {
     mockFetch(() => sseResponse(TURN))
-    render(<ChatPage />)
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await ask('chart please')
 
     const frame = await screen.findByTitle('chart.html')
@@ -50,7 +50,7 @@ describe('ChatPage', () => {
 
   it('sends follow-ups in the same conversation', async () => {
     const calls = mockFetch(() => sseResponse(TURN))
-    render(<ChatPage />)
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await ask('first')
     await screen.findByTitle('chart.html')
     await ask('second')
@@ -62,7 +62,7 @@ describe('ChatPage', () => {
 
   it('shows why a message was refused', async () => {
     mockFetch(() => jsonResponse({ detail: 'this conversation is still answering a message' }, 409))
-    render(<ChatPage />)
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await ask('hi')
 
     expect(await screen.findByText(/still answering a message/)).toBeInTheDocument()
@@ -71,7 +71,7 @@ describe('ChatPage', () => {
 
   it('shows an error from the stream', async () => {
     mockFetch(() => sseResponse([{ type: 'thread', thread_id: 't' }, { type: 'error', message: 'model unavailable' }, { type: 'done' }]))
-    render(<ChatPage />)
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await ask('hi')
     expect(await screen.findByText(/model unavailable/)).toBeInTheDocument()
   })
@@ -80,7 +80,7 @@ describe('ChatPage', () => {
     mockFetch(() =>
       sseResponse([{ type: 'thread', thread_id: 't' }, { type: 'answer', text: 'hi <img src=x onerror=alert(1)>' }, { type: 'done' }]),
     )
-    const { container } = render(<ChatPage />)
+    const { container } = render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await ask('hi')
     await screen.findByText(/hi/, { selector: 'p' })
     expect(container.querySelector('.answer img')).toBeNull()
@@ -88,7 +88,7 @@ describe('ChatPage', () => {
 
   it('new conversation ends the old one and clears the chat', async () => {
     const calls = mockFetch((call) => (call.method === 'DELETE' ? jsonResponse({ closed: true }) : sseResponse(TURN)))
-    render(<ChatPage />)
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await ask('first')
     await screen.findByTitle('chart.html')
 
@@ -104,7 +104,7 @@ describe('ChatPage', () => {
 
   it('Shift+Enter adds a line instead of sending', async () => {
     const calls = mockFetch(() => sseResponse(TURN))
-    render(<ChatPage />)
+    render(<MemoryRouter><ChatPage /></MemoryRouter>)
     await userEvent.type(screen.getByLabelText('Message'), 'line one{Shift>}{Enter}{/Shift}line two')
     expect(chatCalls(calls)).toHaveLength(0)
     expect(screen.getByLabelText('Message')).toHaveValue('line one\nline two')

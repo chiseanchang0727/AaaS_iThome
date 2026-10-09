@@ -19,6 +19,8 @@ from config import cfg
 from datasets import Registry
 
 from analyses import AnalysisStore
+from analyses.budget import Limits
+from datasources import count_query, estimate_query
 from datasources import query_database as _query_database
 
 from .middleware import SkillEnforcerMiddleware
@@ -150,7 +152,7 @@ def build_agent(
         tools.append(make_save_analysis(
             sandbox, analyses,
             query=export_rows, read_dataset=dataset_reader(registry, cfg.server.uploads_dir / "files"),
-            work_dir=cfg.sandbox.data_dir.parent,
+            work_dir=cfg.sandbox.data_dir.parent, estimate=estimate_query, limits=Limits.from_config(cfg), count=count_query,
         ))
 
     middleware = []
