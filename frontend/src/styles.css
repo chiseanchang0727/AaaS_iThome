@@ -1,4 +1,5 @@
 :root {
+  --nav-height: 56px;
   --bg: #f7f7f5;
   --surface: #ffffff;
   --surface-2: #f0f0ec;
@@ -71,9 +72,11 @@ button.danger { background: var(--danger); border-color: var(--danger); color: #
 /* --- layout --------------------------------------------------------------- */
 
 .app { min-height: 100vh; display: flex; flex-direction: column; }
+/* The top bar stays in view while the page scrolls (a sticky header). */
 .nav {
   display: flex; align-items: center; gap: 4px;
   padding: 10px 16px; border-bottom: 1px solid var(--border); background: var(--surface);
+  position: sticky; top: 0; z-index: 30; height: var(--nav-height);
 }
 .brand { font-weight: 650; margin-right: 16px; }
 .account { margin-left: auto; font-size: 0.85em; color: var(--muted); }
@@ -85,6 +88,48 @@ button.danger { background: var(--danger); border-color: var(--danger); color: #
 
 .chat { display: flex; flex-direction: column; min-height: calc(100vh - 100px); }
 .chat-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+.past-turn { display: flex; flex-direction: column; gap: 10px; margin-bottom: 14px; }
+
+/* Chat with its conversations on the side, below the sticky top bar. */
+.main:has(.chat-layout) { max-width: none; padding: 0; }
+.chat-layout { display: grid; grid-template-columns: 264px minmax(0, 1fr); min-height: calc(100vh - var(--nav-height)); }
+.chat-sidebar {
+  position: sticky; top: var(--nav-height); height: calc(100vh - var(--nav-height)); overflow-y: auto;
+  display: flex; flex-direction: column; gap: 10px; padding: 12px 10px;
+  background: var(--surface); border-right: 1px solid var(--border);
+}
+.new-chat { width: 100%; text-align: left; }
+.conversation-list { display: flex; flex-direction: column; gap: 12px; }
+.group-label { margin: 0 0 4px 8px; font-size: 0.75em; font-weight: 600; color: var(--muted); }
+.conversation {
+  display: flex; align-items: center; gap: 6px; padding: 7px 8px; border-radius: 8px;
+  color: var(--text); text-decoration: none; font-size: 0.9em;
+}
+.conversation:hover { background: var(--surface-2); }
+.conversation.active { background: var(--surface-2); font-weight: 600; }
+.conversation-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.conversation .chip { flex: none; font-size: 0.7em; }
+/* The × shows on hover or keyboard focus; the confirm stays visible once asked. */
+.conversation-row { position: relative; }
+.conversation-row .conversation { padding-right: 30px; }
+.conversation-row .icon-button { top: 50%; right: 2px; width: 24px; height: 24px; font-size: 16px; transform: translateY(-50%); opacity: 0; }
+.conversation-row:hover .icon-button, .conversation-row .icon-button:focus-visible { opacity: 1; }
+.conversation-row .row-confirm { top: 50%; right: 4px; transform: translateY(-50%); gap: 6px; background: var(--surface-2); padding-left: 6px; }
+.conversation-row:has(.row-confirm) .conversation-title { opacity: 0.4; }
+@media (hover: none) { .conversation-row .icon-button { opacity: 1; } }
+.chat-main { width: 100%; max-width: 900px; margin: 0 auto; padding: 20px 16px; min-width: 0; }
+.chat-main .chat { min-height: calc(100vh - var(--nav-height) - 40px); }
+.sidebar-toggle, .sidebar-backdrop { display: none; }
+@media (max-width: 760px) {
+  .chat-layout { grid-template-columns: minmax(0, 1fr); }
+  .chat-sidebar {
+    position: fixed; top: 0; left: 0; bottom: 0; height: 100vh; width: min(300px, 85vw); z-index: 20;
+    transform: translateX(-100%); transition: transform 0.2s ease;
+  }
+  .chat-sidebar.open { transform: none; box-shadow: 0 0 40px rgba(0, 0, 0, 0.3); }
+  .sidebar-backdrop { display: block; position: fixed; inset: 0; background: rgba(0, 0, 0, 0.35); z-index: 10; }
+  .sidebar-toggle { display: inline-block; margin-bottom: 10px; }
+}
 .messages { flex: 1; display: flex; flex-direction: column; gap: 14px; padding-bottom: 12px; }
 .empty { margin: auto 0; text-align: center; color: var(--muted); }
 .examples { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 12px; }
@@ -342,6 +387,37 @@ button.small { padding: 3px 10px; font-size: 0.85em; }
 .analysis-meta { font-size: 0.85em; color: var(--muted); }
 .overview-section h3 { font-size: 0.95rem; margin: 6px 0 0; }
 pre.script { max-height: 480px; }
+.optimization { padding: 10px 12px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface-2); }
+.optimization p { margin: 0 0 6px; }
+.optimization p:last-child { margin-bottom: 0; }
+.optimization.needed { border-left: 3px solid var(--danger); }
+.optimization.recommended { border-left: 3px solid var(--status-judge-error); }
+.optimization.done { border-left: 3px solid var(--good); }
+.recipe-controls { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.recipe-compare { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; }
+.recipe-compare > div { min-width: 0; }
+.compare-label { margin: 0; font-weight: 600; }
+.optimization-entry { border-top: 1px solid var(--border); padding-top: 8px; }
+.optimization-head {
+  display: flex; gap: 8px; align-items: flex-start; width: 100%; text-align: left;
+  background: none; border: 0; padding: 4px 0; color: var(--text); font: inherit; cursor: pointer;
+}
+.optimization-reason { display: block; }
+.transcript { display: flex; flex-direction: column; gap: 8px; margin: 6px 0 10px 18px; }
+.transcript .request { max-height: 360px; overflow: auto; font-size: 0.9em; }
+.analysis-links { display: flex; gap: 16px; flex-wrap: wrap; margin: 4px 0 0; }
+.analysis-links:empty { display: none; }
+/* Buttons that act as links here look like the links beside them. */
+.analysis-links .link-button, .optimization .link-button { color: var(--accent); font-size: inherit; text-decoration: underline; }
+.optimize-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.warning-text { color: var(--danger); }
+.warning-text-soft { color: var(--status-judge-error); }
+.run-check summary { cursor: pointer; }
+.run-check table { margin-top: 6px; }
+.verdict-hard { color: var(--danger); font-weight: 600; }
+.verdict-soft { color: var(--status-judge-error); font-weight: 600; }
+.verdict-ok { color: var(--good); }
+.verdict-none, .verdict-counted { color: var(--muted); }
 .saved-analysis {
   margin: 8px 0 0; padding: 8px 12px; border-radius: 8px; font-size: 0.92em;
   background: var(--surface-2); border: 1px solid var(--border);

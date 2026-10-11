@@ -3,7 +3,10 @@
     uv run --env-file ../.env uvicorn api.main:app --reload     # from backend/
 
     POST   /api/chat                         stream one turn (Server-Sent Events)
-    DELETE /api/conversations/{id}           end a conversation, delete its sandbox
+    GET    /api/conversations                saved conversations of this account, latest first
+    GET    /api/conversations/{id}           one saved conversation's history and the files it made
+    DELETE /api/conversations/{id}           end a conversation, delete its sandbox (its history stays)
+    DELETE /api/conversations/{id}/history   delete a saved conversation for good: history, files, sandbox
     GET    /api/artifacts/{id}/{path}        a file the agent made
     GET    /api/health
     GET    /api/sandboxes                    how many sandboxes exist, and what they are doing
@@ -16,6 +19,7 @@ import contextlib
 import logging
 import mimetypes
 import re
+import shutil
 import time
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path, PurePosixPath
@@ -207,6 +211,65 @@ def create_app(
         if conversation is not None and conversation.account != account:
             raise HTTPException(404)
         return {"closed": await manager.close(thread_id)}
+
+    def owner(records: list[dict]) -> str:
+        """Whose a saved conversation is: the account on its first message (older lines have none)."""
+        return next((r["account"] for r in records if r.get("role") == "user" and r.get("account")), default_account)
+
+    def files_made(thread_id: str) -> list[dict]:
+        folder = artifacts_dir / thread_id
+        if not folder.is_dir():
+            return []
+        return [
+            {"name": p.relative_to(folder).as_posix(), "url": f"/api/artifacts/{thread_id}/{p.relative_to(folder).as_posix()}",
+             "kind": p.suffix.lstrip(".").lower()}
+            for p in sorted(folder.rglob("*")) if p.is_file()
+        ]
+
+    @app.get("/api/conversations")
+    async def past_conversations(account: str = Depends(account)):
+        """This account's saved conversations, latest first: what each began with, how long it went."""
+        if history is None:
+            return []
+        found = []
+        for thread_id in history.thread_ids():
+            records = history.read(thread_id)
+            questions = [r for r in records if r.get("role") == "user"]
+            if not questions or owner(records) != account:
+                continue
+            found.append({
+                "id": thread_id,
+                "title": questions[0]["content"][:160],
+                "turns": len(questions),
+                "started_at": records[0].get("ts"),
+                "last_at": records[-1].get("ts"),
+                "files": len(files_made(thread_id)),
+            })
+        return sorted(found, key=lambda c: c["last_at"] or "", reverse=True)
+
+    @app.get("/api/conversations/{thread_id}")
+    async def past_conversation(thread_id: str, account: str = Depends(account)):
+        """One saved conversation: every history line, and the files it made."""
+        records = history.read(thread_id) if history is not None and _ID.match(thread_id) else []
+        if not records or owner(records) != account:
+            raise HTTPException(404, "no such conversation")
+        return {"id": thread_id, "lines": records, "files": files_made(thread_id)}
+
+    @app.delete("/api/conversations/{thread_id}/history")
+    async def delete_past_conversation(thread_id: str, account: str = Depends(account)):
+        """Delete a saved conversation for good: its history, the files it made, and its sandbox if any."""
+        records = history.read(thread_id) if history is not None and _ID.match(thread_id) else []
+        if not records or owner(records) != account:
+            raise HTTPException(404, "no such conversation")
+        live = manager.get(thread_id)
+        if live is not None and live.lock.locked():
+            raise HTTPException(409, "this conversation is still answering a message")
+        await manager.close(thread_id)
+        history.delete(thread_id)
+        files = artifacts_dir / thread_id
+        if files.is_dir():
+            shutil.rmtree(files)
+        return {"deleted": thread_id}
 
     @app.get("/api/artifacts/{thread_id}/{path:path}")
     async def artifact(thread_id: str, path: str):

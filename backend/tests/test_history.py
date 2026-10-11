@@ -135,3 +135,41 @@ def test_assistant_lines_keep_the_model_calls_token_counts(tmp_path):
     _, with_usage, without = history.read("t1")
     assert with_usage["usage"] == {"input_tokens": 5120, "output_tokens": 88}
     assert "usage" not in without
+
+
+def test_past_conversations_are_listed_and_read_by_their_account(tmp_path):
+    history = store(tmp_path)
+    with TestClient(Harness(tmp_path, [TOOL_TURN], history=history).app) as client:
+        thread_id = chat(client, "How many rows?")[0]["thread_id"]
+        [listed] = client.get("/api/conversations").json()
+        assert (listed["id"], listed["title"], listed["turns"]) == (thread_id, "How many rows?", 1)
+        one = client.get(f"/api/conversations/{thread_id}").json()
+        chat_lines = [line["role"] for line in one["lines"] if not line["role"].startswith("sandbox_")]
+        assert chat_lines == ["user", "assistant", "tool", "assistant"]
+        assert one["files"] == []
+        assert client.get("/api/conversations", headers={"X-Account": "alice"}).json() == []
+        assert client.get(f"/api/conversations/{thread_id}", headers={"X-Account": "alice"}).status_code == 404
+        assert client.get("/api/conversations/nope").status_code == 404
+
+
+def test_a_past_conversation_can_be_deleted_for_good_by_its_account(tmp_path):
+    history = store(tmp_path)
+    harness = Harness(tmp_path, [TOOL_TURN], history=history)
+    with TestClient(harness.app) as client:
+        thread_id = chat(client, "How many rows?")[0]["thread_id"]
+        (harness.artifacts / thread_id).mkdir(parents=True, exist_ok=True)
+        (harness.artifacts / thread_id / "chart.html").write_text("<p>chart</p>")
+
+        assert client.delete(f"/api/conversations/{thread_id}/history", headers={"X-Account": "alice"}).status_code == 404
+        assert client.delete(f"/api/conversations/{thread_id}/history").json() == {"deleted": thread_id}
+        assert not history.path(thread_id).exists() and not (harness.artifacts / thread_id).exists()
+        assert client.get("/api/conversations").json() == []
+        assert client.delete(f"/api/conversations/{thread_id}/history").status_code == 404
+
+
+def test_ending_a_conversation_keeps_its_history(tmp_path):
+    history = store(tmp_path)
+    with TestClient(Harness(tmp_path, [TOOL_TURN], history=history).app) as client:
+        thread_id = chat(client, "How many rows?")[0]["thread_id"]
+        client.delete(f"/api/conversations/{thread_id}")
+        assert history.path(thread_id).exists()

@@ -9,6 +9,7 @@ strings for dangerous keywords does not hold up and is not attempted.
 """
 
 import datetime as dt
+import json
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -49,6 +50,17 @@ class PostgresSource:
 
     async def close(self) -> None:
         await self._pool.close()
+
+    async def estimate(self, sql: str) -> dict[str, int]:
+        """The planner's guess for `sql`, without running it: rows, bytes per row, and bytes.
+
+        EXPLAIN (no ANALYZE) only plans the query, in a few milliseconds, so
+        it can be asked before deciding whether to move the rows at all.
+        """
+        async with self._pool.acquire() as conn:
+            plan = json.loads(await conn.fetchval(f"EXPLAIN (FORMAT JSON) {sql}", timeout=self._timeout))[0]["Plan"]
+        rows, width = int(plan["Plan Rows"]), int(plan["Plan Width"])
+        return {"rows": rows, "width": width, "bytes": rows * width}
 
     async def query(self, sql: str, max_rows: int | None = None, *, raw: bool = False) -> list[dict]:
         """Run `sql`; refuse results over `max_rows` (default: the source's cap).

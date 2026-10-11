@@ -74,6 +74,15 @@ class HistoryStore:
         """Every conversation with a history file."""
         return sorted(p.stem for p in self.root.glob("*.jsonl")) if self.root.exists() else []
 
+    def delete(self, thread_id: str) -> bool:
+        """Remove a conversation's history file. Whether there was one."""
+        with self._lock:
+            path = self.path(thread_id)
+            if not path.exists():
+                return False
+            path.unlink()
+            return True
+
     def read(self, thread_id: str) -> list[dict[str, Any]]:
         """Every line of a conversation, oldest first. [] if it has none.
 

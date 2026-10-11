@@ -465,10 +465,60 @@ export interface ComparePreview {
 
 // --- saved analyses (backend/analyses, api/analyses.py) ------------------------
 
+/** One try at optimizing a run: the agent's conversation and how it ended. */
+export interface OptimizationAttempt {
+  status: 'running' | 'done' | 'failed'
+  conversation: string
+  new_version?: number
+  message?: string
+}
+
+/** What one input cost, or would cost (backend analyses/models.py InputMeasure). */
+export interface InputMeasure {
+  file: string
+  tables: string[]
+  estimated_rows: number | null
+  estimated_bytes: number | null
+  /** The real row count, counted in the database without moving the rows, made when the estimate was over a limit. */
+  counted_rows?: number | null
+  rows: number | null
+  bytes: number | null
+  query_seconds: number | null
+}
+
+export interface SandboxMeasure {
+  seconds: number | null
+  cpu_seconds: number | null
+  peak_memory_mb: number | null
+  memory_limit_mb: number | null
+  killed: boolean
+}
+
+/** Hard limits stop a run and ask for an optimization; soft ones (targets) recommend one. */
+export interface RunLimits {
+  hard_export_rows: number
+  max_export_bytes: number
+  soft_export_rows: number
+  soft_export_bytes: number
+  soft_run_seconds: number
+  memory_warning_ratio: number
+  hard_query_seconds: number | null
+}
+
+export type BottleneckKind = 'data_movement' | 'sandbox_memory' | 'sandbox_runtime'
+
+/** A limit a run exceeded: hard ones stop it, soft ones recommend an optimization. */
+export interface Finding {
+  limit: 'hard' | 'soft'
+  kind: BottleneckKind
+  reason: string
+}
+
 export interface AnalysisRun {
   id: string
   started_at: string
-  status: 'running' | 'done' | 'failed'
+  /** needs_optimization: a hard limit stopped it before it could finish (see findings). */
+  status: 'running' | 'done' | 'failed' | 'needs_optimization'
   /** "save": the test run when it was saved; "run": someone clicked Run. */
   trigger: 'save' | 'run'
   seconds: number | null
@@ -480,6 +530,15 @@ export interface AnalysisRun {
   sources: Record<string, string>
   /** The recipe version it ran. */
   version: number
+  measurements: { inputs: InputMeasure[]; sandbox: SandboxMeasure | null } | null
+  findings: Finding[]
+  /** For a run that needed one: the optimization it led to. */
+  optimization: (OptimizationAttempt & {
+    /** Earlier attempts for this run, oldest first: each failed one that was tried again. */
+    earlier?: OptimizationAttempt[]
+  }) | null
+  /** Set on the run made right after an optimization: the version it replaced. */
+  optimized_from: number | null
 }
 
 /** GET /api/analyses/{id}/sources: for one table the recipe reads, the tables that could stand in. */
@@ -520,6 +579,44 @@ export interface Analysis {
   outputs: { file: string; format: 'html' }[]
   /** The tables its queries read. */
   sources: string[]
+  /** Why this version exists, when an optimization saved it. */
+  optimization: {
+    from_version: number
+    kind: BottleneckKind
+    reason: string
+    sources: Record<string, string>
+    run: string | null
+    conversation: string | null
+    /** How its results were checked against the version before, when it was saved. */
+    results_check?: string | null
+  } | null
   runs: AnalysisRun[]
+  /** The limits runs are checked against (backend analyses/budget.py); null if the server does not check. */
+  limits: RunLimits | null
+  /** A run or an optimization is in progress. */
   running: boolean
+  optimizing: boolean
 }
+
+// --- past conversations (backend api/app.py) -----------------------------------
+
+/** One item of GET /api/conversations. */
+export interface PastConversationSummary {
+  id: string
+  /** Its first message. */
+  title: string
+  turns: number
+  started_at: string | null
+  last_at: string | null
+  files: number
+}
+
+/** GET /api/conversations/{id}. */
+export interface PastConversation {
+  id: string
+  lines: HistoryLine[]
+  files: { name: string; url: string; kind: string }[]
+}
+
+/** One version of a saved analysis's recipe (GET /api/analyses/{id}/versions). */
+export type AnalysisVersion = Omit<Analysis, 'runs' | 'running' | 'optimizing' | 'limits'>

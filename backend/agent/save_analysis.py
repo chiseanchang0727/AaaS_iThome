@@ -19,8 +19,10 @@ from langchain_core.runnables import RunnableConfig
 from langchain_core.tools import BaseTool, tool
 
 from analyses import Analysis, AnalysisStore, DatasetInput, Output, QueryInput, RunRecord
-from analyses.models import now
-from analyses.runner import Query, ReadDataset, fetch_inputs, run_in_sandbox
+from analyses.budget import Limits, check_estimates, rows as fmt_rows
+from analyses.models import Measurements, OptimizationNote, now
+from analyses.runner import Count, Estimate, Query, ReadDataset, estimate_inputs, fetch_inputs, run_in_sandbox
+from analyses.same_results import differences
 from analyses.store import new_id, new_run_id
 from analyses.typed_data import typed_results
 from datasets import Registry
@@ -47,7 +49,33 @@ def make_save_analysis(
     query: Query,
     read_dataset: ReadDataset,
     work_dir: PurePosixPath,
+    estimate: Estimate | None = None,
+    limits: Limits | None = None,
+    count: Count | None = None,
 ) -> BaseTool:
+    """`estimate` and `limits` are used when saving an optimized version (analyses/optimize.py)."""
+
+    async def optimization_problems(analysis: Analysis, current: Analysis, pending: dict) -> list[str]:
+        """Before running anything: an optimized version keeps its outputs and must fit the target tables."""
+        problems = []
+        if {o.file for o in analysis.outputs} != {o.file for o in current.outputs}:
+            problems.append("an optimized version makes the same output files as the current one: "
+                            + ", ".join(o.file for o in current.outputs))
+        if estimate is None or limits is None:
+            return problems
+        sources = pending.get("sources") or {}
+        estimates = await estimate_inputs(analysis, estimate, sources, count, limits)
+        problems += [f"on {', '.join(sources.values()) or 'its tables'} it still would not fit: {f.reason}"
+                     for f in check_estimates(Measurements(inputs=estimates), limits)]
+        if not problems and pending.get("kind") == "data_movement":
+            for m in estimates:
+                n = m.counted_rows if m.counted_rows is not None else m.estimated_rows
+                if n is not None and n > limits.soft_export_rows:
+                    problems.append(f"{m.file} would still export about {fmt_rows(n)} rows from "
+                                    f"{', '.join(m.tables)}; reduce it below {fmt_rows(limits.soft_export_rows)} "
+                                    "rows in SQL (filter, select only needed columns, aggregate)")
+        return problems
+
     @tool
     async def save_analysis(
         title: str,
@@ -109,11 +137,20 @@ def make_save_analysis(
         problems = analysis.problems()
         if problems:
             return "NOT SAVED. Fix the recipe and call save_analysis again:\n- " + "\n- ".join(problems)
+        pending = store.optimizing(replaces) if replaces else None
+        current = store.get(replaces) if pending else None
+        if pending and current:
+            problems = await optimization_problems(analysis, current, pending)
+            if problems:
+                return ("NOT SAVED. This is an optimization of version "
+                        f"{current.version}, and the new recipe does not meet it yet:\n- " + "\n- ".join(problems)
+                        + "\nFix the recipe and call save_analysis again.")
 
         started_at, started = now(), time.monotonic()
-        data, problem = await fetch_inputs(analysis, query, read_dataset)
-        if problem:
-            return f"NOT SAVED: {problem}. Fix the recipe and call save_analysis again."
+        fetched = await fetch_inputs(analysis, query, read_dataset)
+        if fetched.problem:
+            return f"NOT SAVED: {fetched.problem}. Fix the recipe and call save_analysis again."
+        data = fetched.files
         typed = typed_results(analysis.script, data)
         if typed:
             return ("NOT SAVED. The script has results typed into it, which would be wrong on other data:\n- "
@@ -126,6 +163,29 @@ def make_save_analysis(
             return (f"NOT SAVED: the test run in an empty folder failed: {result.error}.{log}\n"
                     "Fix the recipe and call save_analysis again.")
 
+        compared = ""
+        if pending and current:
+            before = await fetch_inputs(current, query, read_dataset)
+            old_run = None if before.problem else await asyncio.to_thread(
+                run_in_sandbox, sandbox, current, before.files, work_dir / CHECK_FOLDER / f"{analysis.id}-before")
+            if old_run is not None and old_run.ok:
+                changed, notes = differences(old_run.outputs, result.outputs)
+                if changed:
+                    return (f"NOT SAVED. On the saved tables, the new recipe gives different results than version "
+                            f"{current.version}; an optimization must keep the results:\n- " + "\n- ".join(changed)
+                            + "\nFix the recipe and call save_analysis again.")
+                compared = (" Its results match version {v} on the saved tables." if not notes
+                            else " " + "; ".join(notes) + ".").format(v=current.version)
+            else:
+                compared = f" Version {current.version} could not run on the saved tables, so results were not compared."
+            # The analysis stays linked to the chat it was saved from; this conversation goes in the note.
+            optimizer, analysis.conversation = analysis.conversation, current.conversation
+            analysis.optimization = OptimizationNote(
+                from_version=current.version, kind=pending.get("kind", "data_movement"),
+                reason=pending.get("reason", ""), sources=pending.get("sources") or {},
+                run=pending.get("run"), conversation=optimizer, results_check=compared.strip() or None,
+            )
+
         if replaces:
             analysis = store.replace(analysis)
         else:
@@ -137,7 +197,9 @@ def make_save_analysis(
         files = ", ".join(result.outputs)
         what = (f"Updated analysis {analysis.id} to version {analysis.version}" if replaces
                 else f"Saved analysis {analysis.id}")
-        return (f"{what}: \"{analysis.title}\". Its test run made {files} in {seconds:.0f}s. "
+        if pending:
+            what += " (optimized)"
+        return (f"{what}: \"{analysis.title}\". Its test run made {files} in {seconds:.0f}s.{compared} "
                 "The user can run it again from the Analyses page.")
 
     return save_analysis
@@ -188,7 +250,9 @@ def make_analysis_readers(store: AnalysisStore) -> list[BaseTool]:
     def read_saved_analysis(analysis_id: str) -> str:
         """Read one saved analysis by its id (from list_saved_analyses): its
         inputs (the SQL of each query, or the uploaded file it reads), its
-        script, its output files, and its most recent runs.
+        script, its output files, its most recent runs, and, for a version an
+        optimization saved, why (`optimized`: from which version, the problem,
+        the tables). Earlier versions are not shown.
 
         Use it to explain what a saved analysis does, or to start from its
         recipe: adapt its SQL and script for a new question, then run them in
@@ -200,6 +264,10 @@ def make_analysis_readers(store: AnalysisStore) -> list[BaseTool]:
         return json.dumps({
             "id": a.id, "title": a.title, "description": a.description, "question": a.question,
             "saved_at": a.created_at, "version": a.version, "changed_at": a.updated_at,
+            "optimized": {**a.optimization.model_dump(),
+                          "how": "a run broke a limit, a user clicked Optimize, and you rewrote the recipe; "
+                                 "it was saved after the save checks passed (nothing changes on its own)"}
+                         if a.optimization else None,
             "conversation": a.conversation,
             "inputs": [i.model_dump() for i in a.inputs], "tables": a.source_tables(),
             "script": a.script, "outputs": [o.file for o in a.outputs],

@@ -4,6 +4,7 @@
     <root>/<id>/versions/<n>.json             earlier versions, kept when it is changed
     <root>/<id>/runs/<run id>/run.json        each run (models.RunRecord)
     <root>/<id>/runs/<run id>/outputs/...     the files that run made
+    <root>/<id>/optimizing.json               an optimization in progress (analyses/optimize.py)
 """
 
 import json
@@ -62,6 +63,16 @@ class AnalysisStore:
         self.save(updated)
         return updated
 
+    def versions(self, analysis_id: str) -> list[Analysis]:
+        """Every version, oldest first: the kept ones, then the current one. [] if there is no such analysis."""
+        current = self.get(analysis_id)
+        if current is None:
+            return []
+        folder = self._dir(analysis_id) / "versions"
+        kept = [Analysis.model_validate_json(p.read_text(encoding="utf-8")) for p in folder.glob("*.json")] \
+            if folder.is_dir() else []
+        return sorted(kept, key=lambda a: a.version) + [current]
+
     def get(self, analysis_id: str) -> Analysis | None:
         try:
             path = self._dir(analysis_id) / "analysis.json"
@@ -83,6 +94,25 @@ class AnalysisStore:
             return False
         shutil.rmtree(folder)
         return True
+
+    # --- an optimization in progress ------------------------------------------------
+
+    def start_optimizing(self, analysis_id: str, request: dict) -> None:
+        """Mark it as being optimized: save_analysis then applies the optimization checks."""
+        (self._dir(analysis_id) / "optimizing.json").write_text(json.dumps(request, indent=2), encoding="utf-8")
+
+    def optimizing(self, analysis_id: str) -> dict | None:
+        try:
+            path = self._dir(analysis_id) / "optimizing.json"
+        except KeyError:
+            return None
+        return json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+
+    def stop_optimizing(self, analysis_id: str) -> None:
+        try:
+            (self._dir(analysis_id) / "optimizing.json").unlink(missing_ok=True)
+        except KeyError:
+            pass
 
     # --- runs ---------------------------------------------------------------------
 
