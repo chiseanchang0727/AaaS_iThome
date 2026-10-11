@@ -231,3 +231,13 @@ def test_other_failures_do_not_ask_for_a_bigger_sandbox():
     lazy.ready(Scripted("s", "", 50, 1024, killed=True))  # killed, but far from the limit
     lazy.execute("python3 x.py")
     assert asked == []
+
+
+def test_sampling_runs_the_same_command_and_adds_samples(tmp_path):
+    """Samples are asked for by saved-analysis runs only; a chat step's record keeps its shape."""
+    result, step = run_measured(shell(tmp_path), "echo hi; exit 3", sample_seconds=0.05)
+    assert result.output.startswith("hi\n") and MARKER not in result.output and result.exit_code == 3
+    assert isinstance(step.samples, list)  # empty where there is no /proc (macOS); filled in a Linux sandbox
+    assert all(len(s) == 3 for s in step.samples)
+    _, plain = run_measured(shell(tmp_path), "echo hi")
+    assert plain.samples is None and "samples" not in plain.to_dict()

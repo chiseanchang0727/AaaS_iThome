@@ -28,11 +28,14 @@ from datasources import TooManyRows
 from sandboxes.metering import run_measured
 
 from .budget import Limits, check_estimates, check_run, needs_optimization, over_estimate
-from .models import Analysis, Finding, InputMeasure, Measurements, QueryInput, SandboxMeasure
+from .models import Analysis, Finding, InputMeasure, Measurements, QueryInput, SandboxMeasure, now_ms
 from .sources import swap_tables, tables
 
 LOG_CHARS = 4000
 KILLED = 137
+
+SAMPLE_SECONDS = 0.1
+"""How often a run samples its memory and CPU while the script runs (for the load charts)."""
 """Exit code of a command killed by SIGKILL: almost always out of memory."""
 
 Query = Callable[[str], Awaitable[bytes]]
@@ -186,11 +189,14 @@ def run_in_sandbox(
             if response.error:
                 return done(ok=False, error=f"could not write {response.path}: {response.error}")
 
-        result, step = run_measured(_real(sandbox), f"cd {q} && DATA_DIR={q}/data OUTPUT_DIR={q}/out python3 analysis.py")
+        script_started = now_ms()
+        result, step = run_measured(_real(sandbox), f"cd {q} && DATA_DIR={q}/data OUTPUT_DIR={q}/out python3 analysis.py",
+                                    sample_seconds=SAMPLE_SECONDS)
         killed = result.exit_code == KILLED
         cost = Measurements(sandbox=SandboxMeasure(
             seconds=step.run_seconds or step.seconds, cpu_seconds=step.cpu_seconds,
             peak_memory_mb=step.peak_memory_mb, memory_limit_mb=step.memory_limit_mb, killed=killed,
+            started_at=script_started, samples=step.samples or [],
         ))
         log = _clip(result.output)
         if result.exit_code != 0:

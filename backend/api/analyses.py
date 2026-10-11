@@ -37,12 +37,12 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import Response
 from pydantic import BaseModel
 
 from analyses import Analysis, AnalysisStore, RunRecord
 from analyses.budget import Limits, check_estimates, main_finding
-from analyses.models import InputMeasure, Measurements, now
+from analyses.models import InputMeasure, Measurements, now, now_ms
 from analyses.optimize import request as optimization_request
 from analyses.runner import Count, Estimate, Query, ReadDataset, RunResult, estimate_inputs, run
 from analyses.sources import QueryRows, check_mapping, source_options
@@ -52,11 +52,12 @@ from .app import ARTIFACT_HEADERS
 from .conversations import ConversationManager
 from .events import run_turn
 from .history import HistoryStore
+from .vendor import local_plotly
 
 log = logging.getLogger(__name__)
 
 RUN_FOLDER = ".analysis-run"
-"""The scratch folder for a run, inside the sandbox's work folder."""
+"""Where runs keep their scratch folders (one per run), inside the sandbox's work folder."""
 
 AskAgent = Callable[[str, str, HistoryStore], Awaitable[str]]
 """(conversation id, message, where to log it) -> the agent's final answer."""
@@ -64,12 +65,29 @@ AskAgent = Callable[[str, str, HistoryStore], Awaitable[str]]
 _OPTIMIZATION = re.compile(r"^optimize-[A-Za-z0-9_-]{1,60}$")
 
 
+StartRun = Callable[[Analysis, dict[str, str], str | None], tuple[RunRecord, asyncio.Task]]
+"""(analysis, table swaps, workflow run id) -> its run record and the task that runs it."""
+
+
+@dataclasses.dataclass
+class AnalysesApi:
+    router: APIRouter
+    start: StartRun
+    """Run a saved analysis in the background, as the Run button does; for workflows."""
+    optimizing: Callable[[str], bool]
+    """Whether an analysis is being optimized now (it may get a new version any moment)."""
+
+
 class RunRequest(BaseModel):
     sources: dict[str, str] = {}
     """Tables to read instead of the recipe's own, e.g. {"videos": "videos_ca"}."""
 
 
-def analyses_router(
+def analyses_router(*args, **kwargs) -> APIRouter:
+    return analyses_api(*args, **kwargs).router
+
+
+def analyses_api(
     store: AnalysisStore,
     manager: ConversationManager,
     *,
@@ -82,13 +100,23 @@ def analyses_router(
     count: Count | None = None,
     limits: Limits | None = None,
     ask_agent: AskAgent | None = None,
-) -> APIRouter:
+) -> AnalysesApi:
     """`query`: SQL -> Parquet bytes for an input; `query_rows`: SQL -> rows, to look up tables' columns;
     `estimate` and `limits`: measure and judge runs; `ask_agent`: how optimization talks to the agent
     (default: a conversation through `manager`, logged with the analysis)."""
     router = APIRouter(prefix="/api/analyses")
-    running: dict[str, asyncio.Task] = {}
-    """analysis id -> its run or optimization in progress."""
+    running: dict[str, dict[str, asyncio.Task]] = {}
+    """analysis id -> its runs and optimization in progress, by run id ("optimize" for an optimization).
+    A workflow may run one analysis on several tables at once."""
+
+    def track(analysis_id: str, key: str, task: asyncio.Task) -> None:
+        running.setdefault(analysis_id, {})[key] = task
+
+    def untrack(analysis_id: str, key: str) -> None:
+        tasks = running.get(analysis_id, {})
+        tasks.pop(key, None)
+        if not tasks:
+            running.pop(analysis_id, None)
 
     def get(analysis_id: str) -> Analysis:
         analysis = store.get(analysis_id)
@@ -97,7 +125,7 @@ def analyses_router(
         return analysis
 
     async def run_once(sandbox, analysis: Analysis, record: RunRecord, estimates: list[InputMeasure]) -> RunResult:
-        return await run(sandbox, analysis, query=query, read_dataset=read_dataset, scratch=work_dir / RUN_FOLDER,
+        return await run(sandbox, analysis, query=query, read_dataset=read_dataset, scratch=work_dir / RUN_FOLDER / record.id,
                          sources=record.sources, limits=limits, estimates=estimates)
 
     async def execute(analysis: Analysis, record: RunRecord) -> None:
@@ -115,11 +143,18 @@ def analyses_router(
                 return
             took_sandbox = True
             conversation = await manager.get_or_create(conversation_id, account)
+            # Why a start failed is a sandbox event; keep it, so the run can say so.
+            unavailable: list[str] = []
+            conversation.on_event = lambda event, fields: unavailable.append(str(fields.get("reason", ""))) \
+                if event == "sandbox_unavailable" else None
             if conversation.starting is not None:
                 await conversation.starting
             if conversation.sandbox is None:
-                result = RunResult(ok=False, error="no sandbox could be started (all may be busy); try again")
+                why = f": {unavailable[-1]}" if unavailable and unavailable[-1] else " (all may be busy)"
+                result = RunResult(ok=False, error=f"no sandbox could be started{why}; try again")
                 return
+            record.sandbox_at = now_ms()
+            store.save_run(analysis.id, record)
             result = await run_once(conversation.sandbox, analysis, record, estimates)
             rewritten_for_memory = analysis.optimization is not None and analysis.optimization.kind == "sandbox_memory"
             if result.killed and rewritten_for_memory:
@@ -134,12 +169,13 @@ def analyses_router(
         finally:
             if took_sandbox:
                 await manager.close(conversation_id)
+            record.finished_at = now_ms()
             record.status = "done" if result.ok else "needs_optimization" if result.needs_optimization else "failed"
             record.seconds, record.error, record.log = result.seconds, result.error, result.log
             record.outputs = list(result.outputs)
             record.measurements, record.findings = result.measurements, result.findings
             store.save_run(analysis.id, record, result.outputs)
-            running.pop(analysis.id, None)
+            untrack(analysis.id, record.id)
 
     def transcripts(analysis_id: str) -> HistoryStore:
         """Where an analysis's optimization conversations are kept: with the analysis, not the chats."""
@@ -176,9 +212,11 @@ def analyses_router(
             if updated is not None and updated.version > analysis.version and updated.optimization is not None:
                 record.optimization.update(status="done", new_version=updated.version, message=answer[:800])
                 again = RunRecord(id=new_run_id(), started_at=now(), status="running", trigger="run",
-                                  sources=record.sources, version=updated.version, optimized_from=analysis.version)
+                                  sources=record.sources, version=updated.version, optimized_from=analysis.version,
+                                  queued_at=now_ms())
                 store.save_run(analysis.id, again)
                 follow_up = (updated, again)
+                track(analysis.id, again.id, asyncio.current_task())
             else:
                 record.optimization.update(
                     status="failed", message=(answer or "The agent did not save a new version.")[:800])
@@ -188,10 +226,19 @@ def analyses_router(
         finally:
             store.stop_optimizing(analysis.id)
             store.save_run(analysis.id, record)
-            if follow_up is None:
-                running.pop(analysis.id, None)
+            untrack(analysis.id, "optimize")
         if follow_up is not None:
             await execute(*follow_up)
+
+    def start(analysis: Analysis, swaps: dict[str, str], workflow_run: str | None = None) -> tuple[RunRecord, asyncio.Task]:
+        """Run `analysis` (reading `swaps` instead of its tables) in the background: its record, and the task."""
+        record = RunRecord(id=new_run_id(), started_at=now(), status="running",
+                           trigger="workflow" if workflow_run else "run", sources=swaps, version=analysis.version,
+                           workflow_run=workflow_run, queued_at=now_ms())
+        store.save_run(analysis.id, record)
+        task = asyncio.create_task(execute(analysis, record))
+        track(analysis.id, record.id, task)
+        return record, task
 
     def summary(analysis: Analysis) -> dict[str, Any]:
         runs = store.runs(analysis.id)
@@ -235,10 +282,7 @@ def analyses_router(
             problems = await check_mapping(analysis.source_tables(), swaps, query_rows)
             if problems:
                 raise HTTPException(400, "can't run on those tables: " + "; ".join(problems))
-        record = RunRecord(id=new_run_id(), started_at=now(), status="running", trigger="run", sources=swaps,
-                           version=analysis.version)
-        store.save_run(analysis_id, record)
-        running[analysis_id] = asyncio.create_task(execute(analysis, record))
+        record, _ = start(analysis, swaps)
         return record.model_dump()
 
     @router.get("/{analysis_id}/runs/{run_id}")
@@ -274,7 +318,7 @@ def analyses_router(
         store.save_run(analysis_id, record)
         store.start_optimizing(analysis_id, {"run": record.id, "sources": record.sources,
                                              "kind": problem.kind, "reason": problem.reason})
-        running[analysis_id] = asyncio.create_task(optimize_job(analysis, record))
+        track(analysis_id, "optimize", asyncio.create_task(optimize_job(analysis, record)))
         return record.model_dump()
 
     @router.get("/{analysis_id}/optimizations/{conversation}")
@@ -291,7 +335,7 @@ def analyses_router(
         if path is None:
             raise HTTPException(404)
         # Written by the agent's script: served like any artifact, as an untrusted sandboxed page.
-        return FileResponse(path, media_type="text/html", headers=ARTIFACT_HEADERS)
+        return Response(local_plotly(path.read_bytes()), media_type="text/html", headers=ARTIFACT_HEADERS)
 
     @router.delete("/{analysis_id}")
     async def delete_analysis(analysis_id: str):
@@ -301,4 +345,4 @@ def analyses_router(
             raise HTTPException(404, f"no saved analysis '{analysis_id}'")
         return {"deleted": analysis_id}
 
-    return router
+    return AnalysesApi(router=router, start=start, optimizing=lambda aid: "optimize" in running.get(aid, {}))

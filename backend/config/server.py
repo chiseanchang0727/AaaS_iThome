@@ -33,6 +33,10 @@ class ServerConfig(BaseModel):
     """Where saved analyses (the agent's save_analysis tool) and their runs'
     outputs are kept, one folder each. Resolved against the working directory."""
 
+    workflows_dir: Path = Path("saved_workflows")
+    """Where workflows (analyses run in parallel into a batch) and their runs are
+    kept, one folder each. Resolved against the working directory."""
+
     context_filter: bool = False
     """Send each turn only the earlier turns Jev picks from the history
     (agent.context_filter's settings), instead of the whole conversation

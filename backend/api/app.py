@@ -26,7 +26,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from fastapi import APIRouter, Depends, FastAPI, Header, HTTPException
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, Response, StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
@@ -35,6 +35,7 @@ from sandboxes import download_outputs
 from .conversations import DEFAULT_ACCOUNT, ConversationManager, NotYourConversation
 from .events import run_turn, sse
 from .history import HistoryStore, to_messages
+from .vendor import local_plotly
 
 logger = logging.getLogger(__name__)
 
@@ -280,6 +281,8 @@ def create_app(
         if not target.is_relative_to(root) or not target.is_file():
             raise HTTPException(404)
         media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+        if media_type == "text/html":  # a chart: Plotly from this server, not one CDN download per frame
+            return Response(local_plotly(target.read_bytes()), media_type=media_type, headers=ARTIFACT_HEADERS)
         return FileResponse(target, media_type=media_type, headers=ARTIFACT_HEADERS)
 
     return app

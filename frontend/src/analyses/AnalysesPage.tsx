@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { Link, Route, Routes, useNavigate, useParams } from 'react-router'
+import { Link, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router'
 
 import {
   analysisOutputUrl,
@@ -90,7 +90,7 @@ function onTables(run: AnalysisRun): string {
 }
 
 /** For each table the recipe reads, a choice of the tables with the same columns. */
-function SourcePicker({
+export function SourcePicker({
   options,
   chosen,
   onChange,
@@ -602,7 +602,9 @@ function AnalysisDetail() {
   const { id = '' } = useParams()
   const navigate = useNavigate()
   const [analysis, setAnalysis] = useState<Analysis | null>(null)
-  const [shown, setShown] = useState<string | null>(null)
+  const [searchParams] = useSearchParams()
+  // ?run=<id> opens that run, e.g. from a workflow's node.
+  const [shown, setShown] = useState<string | null>(searchParams.get('run'))
   const [error, setError] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [options, setOptions] = useState<SourceOption[]>([])
@@ -805,7 +807,7 @@ function AnalysisDetail() {
                 <tr key={r.id} className={r.id === current?.id ? 'turn open' : 'turn'} onClick={() => setShown(r.id)}>
                   <td>{when(r.started_at)}</td>
                   <td>
-                    {r.trigger === 'save' ? 'test run when saved' : `run${onTables(r)}`}
+                    {r.trigger === 'save' ? 'test run when saved' : `${r.trigger === 'workflow' ? 'workflow run' : 'run'}${onTables(r)}`}
                     {analysis.version > 1 && <span className="muted"> · v{r.version ?? 1}</span>}
                     {r.optimized_from && <span className="muted"> · after optimization</span>}
                   </td>
