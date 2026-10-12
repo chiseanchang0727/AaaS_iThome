@@ -167,6 +167,13 @@ class RunRecord(BaseModel):
     """When its sandbox was ready (ms); None if it never got one (stopped by the size check, or none free)."""
     finished_at: str | None = None
     """When it ended and gave its sandbox back (ms)."""
+    sandbox: str | None = None
+    """Which sandbox it ran in (the conversation that held it). Runs of one workflow share a few, one after
+    another; a run on its own has its own."""
+    reused: bool = False
+    """It ran in a sandbox an earlier run of the same workflow had used, after a clean-up."""
+    cleanup_seconds: float | None = None
+    """How long that clean-up took."""
 
 
 class Analysis(BaseModel):

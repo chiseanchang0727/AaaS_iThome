@@ -70,7 +70,9 @@ app = create_app(
         vendor_router(cfg.server.artifacts_dir.parent / "vendor"),
         workflows_router(WorkflowStore(cfg.server.workflows_dir), saved_analyses, analyses,
                          query_rows=lambda sql: query_database(sql, raw=True),
-                         sandbox_limit=cfg.server.max_sandboxes_per_account),
+                         sandbox_limit=cfg.server.max_sandboxes_per_account,
+                         # One sandbox stays free for chat while a workflow runs.
+                         lanes=max(1, cfg.server.max_sandboxes_per_account - 1)),
     ],
     history=history,
     default_account=cfg.server.default_account,

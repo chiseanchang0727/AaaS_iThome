@@ -20,9 +20,11 @@ from test_analyses import ShellProvider, no_datasets
 from workflows import Workflow, WorkflowRun, WorkflowStore
 
 
-def build(tmp_path, sandbox_limit=None):
+def build(tmp_path, sandbox_limit=None, lanes=None, more=()):
     analyses = AnalysisStore(tmp_path / "saved")
     analyses.save(naive())
+    for analysis in more:
+        analyses.save(analysis)
     manager = ConversationManager(lambda sandbox, checkpointer: object(), ShellProvider(tmp_path), idle_seconds=900)
     api = analyses_api(analyses, manager, query=fake_query, query_rows=fake_rows, read_dataset=no_datasets,
                        work_dir=PurePosixPath(tmp_path) / "work", account="test_user",
@@ -30,7 +32,8 @@ def build(tmp_path, sandbox_limit=None):
     app = FastAPI()
     app.include_router(api.router)
     app.include_router(workflows_router(WorkflowStore(tmp_path / "workflows"), analyses, api, query_rows=fake_rows,
-                                        sandbox_limit=sandbox_limit))
+                                        sandbox_limit=sandbox_limit, lanes=lanes))
+    app.state.manager = manager
     return app, analyses
 
 
@@ -120,19 +123,79 @@ def test_a_workflow_runs_its_connected_analyses_in_parallel_and_the_batch_collec
     assert no_run.status_code == 404
 
 
-def test_no_more_run_at_once_than_the_account_may_hold_sandboxes(tmp_path):
-    """The rest wait in the workflow, for as long as it takes, instead of the manager's short wait."""
-    app, analyses = build(tmp_path, sandbox_limit=1)
+def lanes_body(*nodes: tuple[str, str, dict]) -> dict:
+    """Analysis nodes (id, analysis, sources) into one batch."""
+    return {"title": "Lanes", "nodes": [*({"kind": "analysis", "id": i, "analysis_id": a, "sources": src}
+                                         for i, a, src in nodes), {"kind": "batch", "id": "batch"}],
+            "edges": [{"source": i, "target": "batch"} for i, _, _ in nodes]}
+
+
+def run_workflow(app, workflow_body):
     with TestClient(app) as client:
-        workflow = client.post("/api/workflows", json=body()).json()
+        workflow = client.post("/api/workflows", json=workflow_body).json()
         started = client.post(f"/api/workflows/{workflow['id']}/runs").json()
-        assert [(n["status"], n["run_id"]) for n in started["nodes"]] == [("waiting", None), ("waiting", None)]
-        run = wait_for(client, workflow["id"], started["id"])
-    first, second = sorted((analyses.get_run("sessions1", n["run_id"]) for n in run["nodes"]), key=lambda r: r.queued_at)
-    assert second.queued_at >= first.finished_at  # one after the other
-    # Both count as queued from when the workflow started: the wait shows on the load chart.
-    assert run["nodes"][0]["queued_at"][:19] == run["nodes"][1]["queued_at"][:19]
-    assert {n["status"] for n in run["nodes"]} == {"done", "needs_optimization"}
+        assert all((n["status"], n["run_id"]) == ("waiting", None) for n in started["nodes"])
+        return wait_for(client, workflow["id"], started["id"])
+
+
+def test_analyses_pass_a_sandbox_on_instead_of_renting_one_each(tmp_path):
+    """One lane: the two that can run share one sandbox, one after the other, cleaned up in between;
+    the one the size check stops never waits for a sandbox."""
+    app, analyses = build(tmp_path, lanes=1)
+    run = run_workflow(app, lanes_body(("a", "sessions1", {}), ("big", "sessions1", {"events": "events_big"}),
+                                       ("b", "sessions1", {})))
+    nodes = {n["node_id"]: n for n in run["nodes"]}
+    assert {i: n["status"] for i, n in nodes.items()} == {"a": "done", "big": "needs_optimization", "b": "done"}
+    assert run["lanes"] == 1
+    first, second = sorted((nodes["a"], nodes["b"]), key=lambda n: n["sandbox_at"])
+    assert first["sandbox"] == second["sandbox"] == f"workflow-{run['id']}-1-1"
+    assert (first["reused"], second["reused"]) == (False, True)  # cleaned in the call that made its folder
+    assert second["sandbox_at"] >= first["finished_at"]  # one after the other
+    assert nodes["big"]["sandbox"] is None and nodes["big"]["finished_at"] <= second["sandbox_at"]
+    # Everyone counts as queued from when the workflow started: the wait shows on the load page.
+    assert len({n["queued_at"][:19] for n in nodes.values()}) == 1
+    assert app.state.manager.get(first["sandbox"]) is None  # given back when the queue was empty
+
+    with TestClient(app) as client:
+        load = client.get(f"/api/workflows/{run['workflow_id']}/runs/{run['id']}/load").text
+    assert "<h4>Sandboxes over time</h4>" in load and 'aria-label="Each sandbox over time: 1 sandbox for 2 analyses"' in load
+    assert "<b>1</b><span>sandboxes started, for 2 analyses</span>" in load
+    assert "this workflow&#x27;s sandboxes: 1" in load and "· reused" in load
+
+
+def test_two_lanes_run_side_by_side(tmp_path):
+    app, _ = build(tmp_path, lanes=2)
+    run = run_workflow(app, lanes_body(*((f"n{k}", "sessions1", {}) for k in range(4))))
+    sandboxes = {n["sandbox"] for n in run["nodes"]}
+    assert sandboxes == {f"workflow-{run['id']}-1-1", f"workflow-{run['id']}-2-1"}
+    assert sorted(n["reused"] for n in run["nodes"]) == [False, False, True, True]
+
+
+def test_a_sandbox_that_ran_out_of_memory_is_not_passed_on(tmp_path):
+    from test_adaptive_runs import NAIVE_SCRIPT
+
+    killer = naive(id="killer1", script=NAIVE_SCRIPT + "\nimport signal\nos.kill(os.getpid(), signal.SIGKILL)\n")
+    app, analyses = build(tmp_path, lanes=1, more=[killer])
+    # Neither has run before, so node order decides: the killer first, then sessions1 needs a new sandbox.
+    run = run_workflow(app, lanes_body(("kill", "killer1", {}), ("ok", "sessions1", {})))
+    nodes = {n["node_id"]: n for n in run["nodes"]}
+    assert nodes["kill"]["status"] == "needs_optimization" and "ran out of memory" in nodes["kill"]["error"]
+    assert nodes["kill"]["sandbox"] == f"workflow-{run['id']}-1-1"
+    assert nodes["ok"]["status"] == "done" and nodes["ok"]["sandbox"] == f"workflow-{run['id']}-1-2"
+    assert nodes["ok"]["reused"] is False
+
+
+def test_the_queue_runs_longest_first_and_never_run_ones_first(tmp_path):
+    from analyses.models import RunRecord
+
+    fast, slow, new = (naive(id=i) for i in ("fast1", "slow1", "new1"))
+    app, analyses = build(tmp_path, lanes=1, more=[fast, slow, new])
+    for analysis_id, seconds in (("fast1", 1.0), ("slow1", 90.0)):
+        analyses.save_run(analysis_id, RunRecord(id="20261001-100000000-aaaa", started_at="t", status="done",
+                                                 trigger="run", seconds=seconds))
+    run = run_workflow(app, lanes_body(("f", "fast1", {}), ("s", "slow1", {}), ("n", "new1", {})))
+    order = [n["node_id"] for n in sorted(run["nodes"], key=lambda n: n["sandbox_at"])]
+    assert order == ["n", "s", "f"]
 
 
 def test_a_workflow_must_have_the_right_shape(tmp_path):
@@ -236,3 +299,65 @@ def test_memory_and_cpu_over_time():
 
     block = batch_load(WorkflowRun(id="r", workflow_id="w", started_at="t", sandbox_limit=3), [a], [a, b])
     assert "Load of this batch" in block and "300 MB" in block and "highest 300 MB" in block
+
+
+class Counting:
+    """A sandbox that counts the calls made to it."""
+
+    def __init__(self, inner):
+        self.inner, self.calls = inner, []
+
+    def execute(self, command, **kwargs):
+        self.calls.append("execute")
+        return self.inner.execute(command, **kwargs)
+
+    def upload_files(self, files):
+        self.calls.append("upload")
+        return self.inner.upload_files(files)
+
+    def download_files(self, paths):
+        self.calls.append("download")
+        return self.inner.download_files(paths)
+
+
+def test_a_run_makes_three_calls_to_its_sandbox(tmp_path, monkeypatch):
+    """Make the folder, upload, run: the outputs come back with the run. Big ones are downloaded."""
+    from analyses import runner
+    from analyses.runner import clean_first, run_in_sandbox
+    from test_adaptive_runs import RAW
+    from agent.tools import to_parquet
+    from test_analyses import shell
+
+    sandbox = Counting(shell(tmp_path))
+    scratch = PurePosixPath(tmp_path) / "work" / ".analysis-run" / "r1"
+    inputs = {"recent_events.parquet": to_parquet(RAW)}
+    result = run_in_sandbox(sandbox, naive(), inputs, scratch, prepare=clean_first(scratch.parent), clean_up=False)
+    assert result.ok, result.error
+    assert sandbox.calls == ["execute", "upload", "execute"]
+    assert b"Plotly.newPlot" in result.outputs["sessions.html"] and "@@analysis_output@@" not in result.log
+
+    monkeypatch.setattr(runner, "INLINE_OUTPUT_BYTES", 10)
+    monkeypatch.setattr(runner, "_EMIT_OUTPUTS", runner._EMIT_OUTPUTS.replace("<=4000000", "<=10"))
+    sandbox.calls.clear()
+    result = run_in_sandbox(sandbox, naive(), inputs, scratch)
+    assert result.ok and b"Plotly.newPlot" in result.outputs["sessions.html"]
+    assert sandbox.calls == ["execute", "upload", "execute", "download", "execute"]  # too big: downloaded; cleaned up
+
+
+def test_the_next_analyses_data_is_fetched_while_one_runs(tmp_path, monkeypatch):
+    import test_workflows
+    from datetime import UTC, datetime
+
+    asked: list[str] = []
+    original = test_workflows.fake_query
+
+    async def timed_query(sql):
+        asked.append(datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z"))
+        return await original(sql)
+
+    monkeypatch.setattr(test_workflows, "fake_query", timed_query)
+    app, _ = build(tmp_path, lanes=1)
+    run = run_workflow(app, lanes_body(*((f"n{k}", "sessions1", {}) for k in range(3))))
+    first, second, third = sorted(run["nodes"], key=lambda n: n["sandbox_at"])
+    assert len(asked) == 3  # each analysis's data fetched once
+    assert sorted(asked)[2] < second["finished_at"]  # the third's data was there before the second ended

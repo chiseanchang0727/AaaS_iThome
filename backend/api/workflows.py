@@ -11,18 +11,32 @@
     GET    /api/workflows/{id}/runs/{run_id}/load                 that run's load: every batch and analysis over time (HTML)
 
 A run starts every analysis node connected to a batch, each as an ordinary
-run of that analysis (trigger "workflow", on the node's tables), so each takes
-its own sandbox. At most `sandbox_limit` (what one account may hold) run at
-once; the rest wait in the workflow, "waiting", and start as others end. The
-sandbox manager would only wait 30 seconds for a free sandbox, made for a
-chat; a workflow of many analyses needs longer. The run ends when every
-node's run has ended. A node that stops with
+run of that analysis (trigger "workflow", on the node's tables). How:
+
+    1. The size check of every node first (database only): a node it stops is
+       recorded as "needs_optimization" at once and never waits for a sandbox.
+       The lanes' sandboxes start meanwhile.
+    2. The rest queue, longest first, by their analysis's past runs on the same
+       tables (one never run counts as longest: it goes first).
+    3. `lanes` sandboxes (fewer than an account may hold, so chat keeps one)
+       take the queue: each runs analyses one after another, cleaning up in
+       between (api/analyses.py, Lane), and is given back when the queue is
+       empty. Renting a sandbox takes 10-15 seconds and a script about one:
+       passing sandboxes on is most of the time a workflow saves.
+    4. While a lane runs one analysis, the inputs of the next ones (as many
+       as there are lanes) are fetched from the database, so a lane does not
+       wait for a query between analyses.
+
+Queued nodes wait in the workflow, "waiting", for as long as it takes (the
+sandbox manager would wait only 30 seconds, made for a chat). The run ends
+when every node's run has ended. A node that stops with
 "needs_optimization" is only marked: the user optimizes it on its analysis's
 page, as for any run. The outputs stay with each analysis run; a report
 node's page (workflows/report.py) is built from them when it is asked for.
 """
 
 import asyncio
+import logging
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -37,8 +51,10 @@ from workflows import Workflow, WorkflowRun, WorkflowStore
 from workflows.models import Edge, Node, NodeRun
 from workflows.report import render, render_load
 
-from .analyses import AnalysesApi
+from .analyses import AnalysesApi, Lane
 from .app import ARTIFACT_HEADERS
+
+log = logging.getLogger(__name__)
 
 
 class WorkflowBody(BaseModel):
@@ -53,9 +69,11 @@ def _seconds(start: str, end: str) -> float:
 
 
 def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: AnalysesApi, *,
-                     query_rows: QueryRows, sandbox_limit: int | None = None) -> APIRouter:
+                     query_rows: QueryRows, sandbox_limit: int | None = None, lanes: int | None = None) -> APIRouter:
     """`api`: starts analysis runs as the Run button does; `query_rows`: to check each node's table swaps;
-    `sandbox_limit`: how many sandboxes an account may hold at once, shown on the report's load chart."""
+    `sandbox_limit`: how many sandboxes an account may hold at once; `lanes`: how many of them a workflow run
+    uses (default: all but one, for chat)."""
+    lanes = lanes or max(1, (sandbox_limit or 2) - 1)
     router = APIRouter(prefix="/api/workflows")
     running: dict[str, asyncio.Task] = {}
     """workflow id -> its run in progress."""
@@ -91,6 +109,7 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
                 # Queued when the workflow started, though its analysis run began when a place freed up.
                 node.queued_at = node.queued_at or record.queued_at
                 node.sandbox_at, node.finished_at = record.sandbox_at, record.finished_at
+                node.sandbox, node.reused, node.cleanup_seconds = record.sandbox, record.reused, record.cleanup_seconds
                 measured = record.measurements
                 moved = [i for i in measured.inputs if i.rows is not None] if measured else []
                 node.rows = sum(i.rows for i in moved) if moved else None
@@ -102,6 +121,70 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
                     node.script_at, node.script_seconds, node.samples = sandbox.started_at, sandbox.seconds, sandbox.samples
         run.settle()
         return run
+
+    def expected_seconds(analysis_id: str, swaps: dict[str, str]) -> float:
+        """How long it took last time on these tables, in its sandbox; infinite if it never ran there."""
+        for record in analyses.runs(analysis_id):
+            if record.status == "done" and record.sources == swaps and record.seconds is not None:
+                return record.seconds
+        return float("inf")
+
+    async def schedule(run: WorkflowRun, jobs: list) -> None:
+        """Check every job's size, start the stopped ones (they need no sandbox), run the rest in lanes."""
+        # Start the sandboxes while the sizes are checked: the check is database work, a start takes 10-15 s.
+        opened = [Lane(name=f"workflow-{run.id}-{k + 1}") for k in range(min(lanes, len(jobs)))]
+        for lane in opened:
+            await api.open_lane(lane)
+
+        async def check(job):
+            _, analysis, swaps = job
+            try:
+                return await api.precheck(analysis, swaps)
+            except Exception:
+                log.warning("size check of %s failed; its run will say why", analysis.id, exc_info=True)
+                return None, []
+        checks = await asyncio.gather(*(check(job) for job in jobs))
+        stopped, queue = [], []
+        for job, (estimates, stop) in zip(jobs, checks):
+            (stopped if stop else queue).append((*job, estimates))
+
+        fetching: dict[str, asyncio.Task] = {}
+
+        def prefetch(job) -> None:
+            entry, analysis, swaps, estimates = job
+            if entry.node_id not in fetching:
+                fetching[entry.node_id] = asyncio.create_task(api.fetch(analysis, swaps, estimates))
+
+        def launch(entry: NodeRun, analysis, swaps, estimates, lane=None) -> asyncio.Task:
+            record, task = api.start(analysis, swaps, run.id, lane=lane, estimates=estimates,
+                                     inputs=fetching.get(entry.node_id))
+            entry.run_id, entry.status = record.id, "running"
+            store.save_run(run)
+            return task
+
+        tasks = [launch(*job) for job in stopped]
+        # Longest first: short ones fill the gaps at the end. The sort keeps node order among equals.
+        queue.sort(key=lambda job: -expected_seconds(job[1].id, job[2]))
+
+        async def work(lane: Lane) -> None:
+            try:
+                while queue:
+                    job = queue.pop(0)
+                    prefetch(job)
+                    for ahead in queue[:lanes]:  # the next ones' data, while this one runs
+                        prefetch(ahead)
+                    await launch(*job, lane=lane)
+            finally:
+                await api.close_lane(lane)  # nothing left for it: give its sandbox back now
+
+        busy = opened[:len(queue)]
+        for spare in opened[len(queue):]:  # more sandboxes started than analyses can run
+            await api.close_lane(spare)
+        try:
+            await asyncio.gather(*tasks, *(work(lane) for lane in busy), return_exceptions=True)
+        finally:
+            for task in fetching.values():  # one fetched for a run that never came (an error)
+                task.cancel()
 
     async def finish(run: WorkflowRun, tasks: list[asyncio.Task]) -> None:
         try:
@@ -197,30 +280,16 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
 
         run = WorkflowRun(id=new_run_id(), workflow_id=workflow.id, started_at=now(), batches=workflow.batches(),
                           reports=workflow.reports(), workflow_title=workflow.title, sandbox_limit=sandbox_limit,
-                          titles={n.id: n.title for n in workflow.nodes if n.kind != "analysis"})
-        places = asyncio.Semaphore(sandbox_limit) if sandbox_limit else None
-
-        async def go(node: NodeRun, analysis, swaps: dict[str, str]) -> None:
-            async def launch() -> None:
-                record, task = api.start(analysis, swaps, run.id)
-                node.run_id, node.status = record.id, "running"
-                store.save_run(run)
-                await task
-            if places is None:
-                return await launch()
-            async with places:
-                await launch()
-
-        tasks = []
+                          lanes=lanes, titles={n.id: n.title for n in workflow.nodes if n.kind != "analysis"})
+        jobs = []
         for node, analysis in targets:
             swaps = {old: new for old, new in node.sources.items() if old != new}
             entry = NodeRun(node_id=node.id, analysis_id=analysis.id, title=analysis.title, sources=swaps,
                             version=analysis.version, status="waiting", queued_at=now_ms())
             run.nodes.append(entry)
-            tasks.append((entry, analysis, swaps))
+            jobs.append((entry, analysis, swaps))
         store.save_run(run)
-        started = [asyncio.create_task(go(*t)) for t in tasks]
-        running[workflow_id] = asyncio.create_task(finish(run, started))
+        running[workflow_id] = asyncio.create_task(finish(run, [asyncio.create_task(schedule(run, jobs))]))
         return run.model_dump()
 
     @router.get("/{workflow_id}/runs/{run_id}")

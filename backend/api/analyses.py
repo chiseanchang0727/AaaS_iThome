@@ -42,9 +42,10 @@ from pydantic import BaseModel
 
 from analyses import Analysis, AnalysisStore, RunRecord
 from analyses.budget import Limits, check_estimates, main_finding
-from analyses.models import InputMeasure, Measurements, now, now_ms
+from analyses.models import Finding, InputMeasure, Measurements, now, now_ms
 from analyses.optimize import request as optimization_request
-from analyses.runner import Count, Estimate, Query, ReadDataset, RunResult, estimate_inputs, run
+from analyses.runner import (Count, Estimate, Fetched, Query, ReadDataset, RunResult, clean_first, estimate_inputs,
+                             fetch_inputs, run)
 from analyses.sources import QueryRows, check_mapping, source_options
 from analyses.store import new_run_id
 
@@ -65,8 +66,31 @@ AskAgent = Callable[[str, str, HistoryStore], Awaitable[str]]
 _OPTIMIZATION = re.compile(r"^optimize-[A-Za-z0-9_-]{1,60}$")
 
 
-StartRun = Callable[[Analysis, dict[str, str], str | None], tuple[RunRecord, asyncio.Task]]
-"""(analysis, table swaps, workflow run id) -> its run record and the task that runs it."""
+@dataclasses.dataclass
+class Lane:
+    """A sandbox a workflow run keeps for several of its analyses, one after another.
+
+    Renting a sandbox takes 10-15 seconds and a saved analysis's script about one, so a
+    workflow passes its sandboxes on instead of renting one per analysis. Before the next
+    analysis, the last one's processes are stopped and its folder deleted. A sandbox that
+    ran out of memory, or does not clean up, is closed; the lane rents a new one.
+    """
+
+    name: str
+    generation: int = 1
+    """Which sandbox of the lane: a new one after a retired one."""
+    runs: int = 0
+    """Analyses run in the current sandbox."""
+
+    @property
+    def conversation_id(self) -> str:
+        return f"{self.name}-{self.generation}"
+
+
+StartRun = Callable[..., tuple[RunRecord, asyncio.Task]]
+"""(analysis, table swaps, workflow run id, lane=None, estimates=None) -> its run record and the task that runs it."""
+Precheck = Callable[[Analysis, dict[str, str]], Awaitable[tuple[list[InputMeasure], list[Finding]]]]
+"""(analysis, table swaps) -> its estimates, and the hard limits they break (empty: it may run)."""
 
 
 @dataclasses.dataclass
@@ -76,6 +100,14 @@ class AnalysesApi:
     """Run a saved analysis in the background, as the Run button does; for workflows."""
     optimizing: Callable[[str], bool]
     """Whether an analysis is being optimized now (it may get a new version any moment)."""
+    precheck: Precheck
+    """The size check a run starts with, on its own: a workflow checks every analysis before queueing."""
+    close_lane: Callable[[Lane], Awaitable[None]]
+    """Give a lane's sandbox back."""
+    open_lane: Callable[[Lane], Awaitable[None]]
+    """Start a lane's sandbox now, before its first analysis needs it."""
+    fetch: Callable[[Analysis, dict[str, str], list[InputMeasure] | None], Awaitable[Fetched]]
+    """Fetch an analysis's inputs ahead of its run: (analysis, table swaps, estimates)."""
 
 
 class RunRequest(BaseModel):
@@ -124,50 +156,112 @@ def analyses_api(
             raise HTTPException(404, f"no saved analysis '{analysis_id}'")
         return analysis
 
-    async def run_once(sandbox, analysis: Analysis, record: RunRecord, estimates: list[InputMeasure]) -> RunResult:
+    async def run_once(sandbox, analysis: Analysis, record: RunRecord, estimates: list[InputMeasure],
+                       fetched: Fetched, prepare: str = "") -> RunResult:
+        # The folder is left: the sandbox is closed right after, or cleaned before its next run.
         return await run(sandbox, analysis, query=query, read_dataset=read_dataset, scratch=work_dir / RUN_FOLDER / record.id,
-                         sources=record.sources, limits=limits, estimates=estimates)
+                         sources=record.sources, limits=limits, estimates=estimates, fetched=fetched,
+                         prepare=prepare, clean_up=False)
 
-    async def execute(analysis: Analysis, record: RunRecord) -> None:
-        conversation_id = f"analysis-{record.id}"
+    async def precheck(analysis: Analysis, swaps: dict[str, str]) -> tuple[list[InputMeasure], list[Finding]]:
+        estimates = await estimate_inputs(analysis, estimate, swaps, count, limits) if estimate is not None else []
+        stop = check_estimates(Measurements(inputs=estimates), limits) if limits is not None else []
+        return estimates, stop
+
+    async def sandbox_for(conversation_id: str):
+        """The conversation's sandbox, started if need be: (conversation, None), or (None, why not)."""
+        conversation = await manager.get_or_create(conversation_id, account)
+        # Why a start failed is a sandbox event; keep it, so the run can say so.
+        unavailable: list[str] = []
+        conversation.on_event = lambda event, fields: unavailable.append(str(fields.get("reason", ""))) \
+            if event == "sandbox_unavailable" else None
+        if conversation.starting is not None:
+            await conversation.starting
+        if conversation.sandbox is None:
+            await manager.close(conversation_id)
+            why = f": {unavailable[-1]}" if unavailable and unavailable[-1] else " (all may be busy)"
+            return None, f"no sandbox could be started{why}; try again"
+        return conversation, None
+
+    async def retire(lane: Lane) -> None:
+        """Close the lane's sandbox; its next analysis gets a new one."""
+        await manager.close(lane.conversation_id)
+        lane.generation, lane.runs = lane.generation + 1, 0
+
+    async def close_lane(lane: Lane) -> None:
+        await manager.close(lane.conversation_id)
+
+    async def open_lane(lane: Lane) -> None:
+        await manager.get_or_create(lane.conversation_id, account)  # its sandbox starts in the background
+
+    async def fetch(analysis: Analysis, swaps: dict[str, str], estimates: list[InputMeasure] | None) -> Fetched:
+        return await fetch_inputs(analysis, query, read_dataset, swaps, estimates)
+
+    async def execute(analysis: Analysis, record: RunRecord, lane: Lane | None = None,
+                      estimates: list[InputMeasure] | None = None, inputs: asyncio.Task | None = None) -> None:
+        """Run it. With a `lane`, in the lane's sandbox, cleaned first if an earlier run used it, and left
+        open for the next; without, in a sandbox of its own, closed after. `estimates`: its size check,
+        if a workflow already made it; `inputs`: its inputs, being fetched already."""
+        conversation_id = lane.conversation_id if lane is not None else f"analysis-{record.id}"
         result = RunResult(ok=False, error="the run did not start")
         took_sandbox = False
+        fetching: asyncio.Task | None = inputs
         try:
             # Measure first: if the estimate already breaks a hard limit, no rows move and no sandbox starts.
-            estimates = (await estimate_inputs(analysis, estimate, record.sources, count, limits)
-                         if estimate is not None else [])
-            stop = check_estimates(Measurements(inputs=estimates), limits) if limits is not None else []
+            if estimates is None:
+                estimates, stop = await precheck(analysis, record.sources)
+            else:
+                stop = check_estimates(Measurements(inputs=estimates), limits) if limits is not None else []
             if stop:
                 result = RunResult(ok=False, error=stop[0].reason, findings=stop,
                                    measurements=Measurements(inputs=estimates))
                 return
             took_sandbox = True
-            conversation = await manager.get_or_create(conversation_id, account)
-            # Why a start failed is a sandbox event; keep it, so the run can say so.
-            unavailable: list[str] = []
-            conversation.on_event = lambda event, fields: unavailable.append(str(fields.get("reason", ""))) \
-                if event == "sandbox_unavailable" else None
-            if conversation.starting is not None:
-                await conversation.starting
-            if conversation.sandbox is None:
-                why = f": {unavailable[-1]}" if unavailable and unavailable[-1] else " (all may be busy)"
-                result = RunResult(ok=False, error=f"no sandbox could be started{why}; try again")
+            # The data comes from the database, not the sandbox: fetch it while the sandbox starts.
+            if fetching is None:
+                fetching = asyncio.create_task(fetch_inputs(analysis, query, read_dataset, record.sources, estimates))
+            conversation, why = await sandbox_for(conversation_id)
+            if conversation is None:
+                result = RunResult(ok=False, error=why)
                 return
-            record.sandbox_at = now_ms()
+            fetched = await fetching
+            reused = lane is not None and lane.runs > 0
+            record.sandbox, record.sandbox_at, record.reused = conversation_id, now_ms(), reused
             store.save_run(analysis.id, record)
-            result = await run_once(conversation.sandbox, analysis, record, estimates)
+            # A reused sandbox is cleaned in the same call that makes this run's folder.
+            prepare = clean_first(work_dir / RUN_FOLDER) if reused else ""
+            result = await run_once(conversation.sandbox, analysis, record, estimates, fetched, prepare)
+            if reused and not result.ok and (result.error or "").startswith("could not make the scratch folder"):
+                await retire(lane)  # it would not clean up: a new sandbox, once
+                conversation_id = lane.conversation_id
+                conversation, why = await sandbox_for(conversation_id)
+                if conversation is None:
+                    result = RunResult(ok=False, error=why)
+                    return
+                record.sandbox, record.sandbox_at, record.reused = conversation_id, now_ms(), False
+                result = await run_once(conversation.sandbox, analysis, record, estimates, fetched)
+            if lane is not None:
+                lane.runs += 1
             rewritten_for_memory = analysis.optimization is not None and analysis.optimization.kind == "sandbox_memory"
+            upgraded = False
             if result.killed and rewritten_for_memory:
                 # The script was already rewritten to use less memory: now a bigger sandbox is the answer.
                 upgrade = await manager.upgrade(conversation, "a saved analysis ran out of memory")
                 record.notes.append(upgrade.note)
                 if upgrade.sandbox is not None:
-                    result = await run_once(upgrade.sandbox, analysis, record, estimates)
+                    upgraded = True
+                    result = await run_once(upgrade.sandbox, analysis, record, estimates, fetched)
+            if lane is not None and result.killed and not upgraded:
+                await retire(lane)  # what ran out of memory may have left the sandbox unwell: not passed on
         except Exception as e:
             log.exception("running saved analysis %s failed", analysis.id)
             result = RunResult(ok=False, error=str(e))
+            if lane is not None and took_sandbox:
+                await retire(lane)
         finally:
-            if took_sandbox:
+            if fetching is not None and not fetching.done():
+                fetching.cancel()
+            if took_sandbox and lane is None:
                 await manager.close(conversation_id)
             record.finished_at = now_ms()
             record.status = "done" if result.ok else "needs_optimization" if result.needs_optimization else "failed"
@@ -230,13 +324,16 @@ def analyses_api(
         if follow_up is not None:
             await execute(*follow_up)
 
-    def start(analysis: Analysis, swaps: dict[str, str], workflow_run: str | None = None) -> tuple[RunRecord, asyncio.Task]:
-        """Run `analysis` (reading `swaps` instead of its tables) in the background: its record, and the task."""
+    def start(analysis: Analysis, swaps: dict[str, str], workflow_run: str | None = None, *,
+              lane: Lane | None = None, estimates: list[InputMeasure] | None = None,
+              inputs: asyncio.Task | None = None) -> tuple[RunRecord, asyncio.Task]:
+        """Run `analysis` (reading `swaps` instead of its tables) in the background: its record, and the task.
+        A workflow passes its `lane`, and the `estimates` of its size check."""
         record = RunRecord(id=new_run_id(), started_at=now(), status="running",
                            trigger="workflow" if workflow_run else "run", sources=swaps, version=analysis.version,
                            workflow_run=workflow_run, queued_at=now_ms())
         store.save_run(analysis.id, record)
-        task = asyncio.create_task(execute(analysis, record))
+        task = asyncio.create_task(execute(analysis, record, lane, estimates, inputs))
         track(analysis.id, record.id, task)
         return record, task
 
@@ -345,4 +442,5 @@ def analyses_api(
             raise HTTPException(404, f"no saved analysis '{analysis_id}'")
         return {"deleted": analysis_id}
 
-    return AnalysesApi(router=router, start=start, optimizing=lambda aid: "optimize" in running.get(aid, {}))
+    return AnalysesApi(router=router, start=start, optimizing=lambda aid: "optimize" in running.get(aid, {}),
+                       precheck=precheck, close_lane=close_lane, open_lane=open_lane, fetch=fetch)

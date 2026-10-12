@@ -9,7 +9,11 @@ While the script runs, the sandbox samples it every 0.1 s (sandboxes/metering.py
 the memory of its processes, and the CPU time used so far. Each run has a
 sandbox of its own, so those are that analysis's.
 
+A workflow run passes a few sandboxes from one analysis to the next (api/analyses.py, Lane): a
+sandbox may run several of its analyses, cleaned up in between.
+
 Drawn for the whole run, for each batch, and for each analysis:
+    - each sandbox over time: its start-up, the analyses it ran (by batch), the clean-ups (whole run)
     - how many analyses were in a sandbox, and how many not yet, over time (whole run and batches)
     - memory over time, added up over the analyses (whole run and batches), or its own (analysis)
     - CPU over time, in cores (analysis)
@@ -29,6 +33,10 @@ SCRIPT = "#2a6fdb"
 MEMORY = "#7b4fd6"
 CPU = "#1f8a4c"
 LIMIT = "#c2372b"
+STARTUP = "#c9c9c2"
+CLEANUP = "#e6e6e0"
+BATCHES = ["#2a6fdb", "#eb6834", "#1f8a4c", "#7b4fd6", "#b5179e", "#0b8a8a"]
+"""A colour per batch, in order; text on them is white."""
 
 STYLE = """
 .load { background: #fff; border: 1px solid #deded8; border-radius: 10px; padding: 14px 16px; margin: 16px 0 8px; }
@@ -191,7 +199,68 @@ def line_chart(points: list[tuple[float, float]], *, start: float, end: float, c
     return "".join(parts)
 
 
-def counts_chart(found: list[Phases], end: float, limit: int | None, height: int = 170, width: int = WIDTH) -> str:
+def sandbox_of(p: Phases) -> str | None:
+    """Which sandbox it ran in; a run from before sandboxes were shared had one of its own."""
+    if p.node.sandbox:
+        return p.node.sandbox
+    return f"own-{p.node.node_id}" if p.ready is not None else None
+
+
+def limit_of(run: WorkflowRun) -> tuple[int | None, str]:
+    """The line the sandboxes in use are measured against, and what to call it."""
+    if run.lanes:
+        return run.lanes, f"this workflow's sandboxes: {run.lanes}"
+    return run.sandbox_limit, f"sandbox limit: {run.sandbox_limit}"
+
+
+def sandboxes_chart(found: list[Phases], end: float, batch_of: dict[str, int]) -> str:
+    """One row per sandbox: its start-up, then each analysis it ran (coloured by batch), clean-ups between."""
+    rows: dict[str, list[Phases]] = {}
+    for p in sorted((p for p in found if p.ready is not None), key=lambda p: p.ready):
+        rows.setdefault(sandbox_of(p), []).append(p)
+    if not rows:
+        return ""
+    row, label_w = 30, 110
+    plot_w = WIDTH - label_w - 20
+    height = row * len(rows) + 24
+    x = lambda t: label_w + (t / end if end else 0) * plot_w  # noqa: E731
+    ran = sum(len(r) for r in rows.values())
+    parts = [f'<svg viewBox="0 0 {WIDTH} {height}" width="100%" role="img" aria-label="Each sandbox over time: '
+             f'{len(rows)} sandbox{"" if len(rows) == 1 else "es"} for {ran} analys{"is" if ran == 1 else "es"}">']
+
+    def block(start: float, stop: float, top: float, color: str, title: str, text: str = "") -> str:
+        width = max(x(stop) - x(start), 1)
+        label = ""
+        if text and width > 40:
+            fits = max(int(width / 7) - 1, 1)
+            short = text if len(text) <= fits else text[: max(fits - 1, 1)] + "…"
+            label = f'<text x="{x(start) + 5:.1f}" y="{top + 15}" style="fill:#fff">{escape(short)}</text>'
+        return (f'<g><title>{escape(title)}</title><rect x="{x(start):.1f}" y="{top}" width="{width:.1f}" height="21" '
+                f'rx="3" fill="{color}"/>{label}</g>')
+
+    for i, (_, runs) in enumerate(rows.items()):
+        top = i * row + 4
+        parts.append(f'<text class="label" x="{label_w - 10}" y="{top + 15}" text-anchor="end">Sandbox {i + 1}</text>')
+        first = runs[0]
+        parts.append(block(first.queued, first.ready, top, STARTUP,
+                           f"{first.ready - first.queued:.1f}s before it was ready (size check, start-up)"))
+        for before, p in zip([None, *runs], runs):
+            if before is not None:
+                parts.append(block(before.finished, p.ready, top, CLEANUP,
+                                   f"{p.ready - before.finished:.1f}s between analyses (clean-up)"))
+            color = BATCHES[batch_of.get(p.node.node_id, 0) % len(BATCHES)]
+            reused = ", reused" if p.node.reused else ", new sandbox"
+            parts.append(block(p.ready, p.finished, top, color,
+                               f"{p.node.title}: {p.finished - p.ready:.1f}s{reused}", p.node.title))
+    for k in range(6):
+        t = end * k / 5
+        parts.append(f'<text x="{x(t):.1f}" y="{height - 6}" text-anchor="middle">{_seconds(t, end)}</text>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def counts_chart(found: list[Phases], end: float, limit: int | None, height: int = 170, width: int = WIDTH,
+                 limit_label: str = "") -> str:
     """Analyses in a sandbox (blue) and not yet in one (yellow), stacked; the sandbox limit dashed."""
     moments = counts(found)
     left, bottom, top, right = 52, 24, 10, 10
@@ -219,7 +288,7 @@ def counts_chart(found: list[Phases], end: float, limit: int | None, height: int
     if limit:
         parts.append(f'<line x1="{left}" x2="{width - right}" y1="{y(limit):.1f}" y2="{y(limit):.1f}" stroke="{LIMIT}" '
                      f'stroke-dasharray="6 4" stroke-width="1.5"/><text x="{width - right - 2}" y="{y(limit) - 5:.1f}" '
-                     f'text-anchor="end">sandbox limit: {limit}</text>')
+                     f'text-anchor="end">{escape(limit_label or f"sandbox limit: {limit}")}</text>')
     for i in range(6):
         t = end * i / 5
         parts.append(f'<text x="{x(t):.1f}" y="{height - 6}" text-anchor="middle">{_seconds(t, end)}</text>')
@@ -258,6 +327,8 @@ def bars(groups: list[tuple[str | None, list[Phases]]], end: float) -> str:
                 memory = f", peak {p.node.peak_memory_mb:,.0f} MB" if p.node.peak_memory_mb else ""
                 parts.append(bar(p.script, p.script_end, top, SCRIPT, f"{p.script_end - p.script:.1f}s running its script{memory}"))
             note = f"{p.node.peak_memory_mb:,.0f} MB" if p.node.peak_memory_mb else ("no sandbox" if p.ready is None else "")
+            if p.node.reused:
+                note += " · reused"
             parts.append(f'<text x="{x(p.finished) + 6:.1f}" y="{top + 13}">{note}</text>')
             i += 1
     for k in range(6):
@@ -287,6 +358,9 @@ def facts(nodes: list[NodeRun], found: list[Phases], limit: int | None) -> list[
         peak_at, peak, _ = max(moments, key=lambda c: (c[1], -c[0]))
         of = f" of {limit}" if limit else ""
         found_facts.append((f"{peak}{of}", f"sandboxes busy at the peak ({peak_at:.0f}s in)"))
+        used = {sandbox_of(p) for p in found} - {None}
+        ran = sum(1 for p in found if p.ready is not None)
+        found_facts.append((f"{len(used)}", f"sandboxes started, for {ran} analyses"))
         waited = sum((p.ready if p.ready is not None else p.finished) - p.queued for p in found)
         found_facts.append((f"{waited:.0f}s", "before sandboxes were ready, all together"))
         span = max(p.finished for p in found) - min(p.queued for p in found)
@@ -314,7 +388,8 @@ def _facts_list(items: list[tuple[str, str]]) -> str:
 def run_load(run: WorkflowRun, nodes: list[NodeRun], groups: list[tuple[str | None, list[NodeRun]]]) -> str:
     """The Load region for the whole run (or every batch a report shows): numbers, the charts, the bars by batch."""
     found = phases(nodes)
-    parts = ['<section class="load"><h2>Load</h2>', _facts_list(facts(nodes, found, run.sandbox_limit))]
+    limit, limit_label = limit_of(run)
+    parts = ['<section class="load"><h2>Load</h2>', _facts_list(facts(nodes, found, limit))]
     if not found:
         parts.append('<p class="muted">The timing of each analysis was not recorded for this run: '
                      "only runs from now on have load charts.</p></section>")
@@ -323,7 +398,17 @@ def run_load(run: WorkflowRun, nodes: list[NodeRun], groups: list[tuple[str | No
     by_node = {p.node.node_id: p for p in found}
     parts += ["<h4>Analyses in sandboxes over time</h4>",
               legend((SCRIPT, "in a sandbox"), (WAITING, "before its sandbox was ready")),
-              counts_chart(found, end, run.sandbox_limit)]
+              counts_chart(found, end, limit, limit_label=limit_label)]
+    batch_of = {}
+    for k, (_, members) in enumerate(groups):
+        for n in members:
+            batch_of.setdefault(n.node_id, k)
+    chart = sandboxes_chart(found, end, batch_of)
+    if chart:
+        parts += ["<h4>Sandboxes over time</h4>",
+                  legend((STARTUP, "starting up"), (CLEANUP, "clean-up between analyses"),
+                         *((BATCHES[k % len(BATCHES)], name or "Batch") for k, (name, _) in enumerate(groups))),
+                  chart]
     total = memory_total(found, end)
     if total:
         parts += ["<h4>Memory in use over time, all sandboxes together</h4>",
@@ -345,8 +430,10 @@ def batch_load(run: WorkflowRun, members: list[NodeRun], all_nodes: list[NodeRun
     found = [p for p in everyone if p.node.node_id in ids]
     if not found:
         return ""
-    parts = ['<div class="batch-load"><h3>Load of this batch</h3>', _facts_list(facts(members, found, run.sandbox_limit)),
-             '<div class="pair"><div>', "<h4>Analyses in sandboxes</h4>", counts_chart(found, end, run.sandbox_limit, height=170, width=600),
+    limit, limit_label = limit_of(run)
+    parts = ['<div class="batch-load"><h3>Load of this batch</h3>', _facts_list(facts(members, found, limit)),
+             '<div class="pair"><div>', "<h4>Analyses in sandboxes</h4>",
+             counts_chart(found, end, limit, height=170, width=600, limit_label=limit_label),
              "</div><div>"]
     total = memory_total(found, end)
     if total:

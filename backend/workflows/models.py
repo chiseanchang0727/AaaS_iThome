@@ -142,6 +142,11 @@ class NodeRun(BaseModel):
     memory_limit_mb: int | None = None
     script_at: str | None = None
     """When its script started (ms), after its inputs were copied into the sandbox."""
+    sandbox: str | None = None
+    """Which sandbox it ran in: analyses of one run share a few, one after another."""
+    reused: bool = False
+    """Its sandbox had run another analysis of this run before it (cleaned up in between)."""
+    cleanup_seconds: float | None = None
     script_seconds: float | None = None
     samples: list[list[float | None]] = []
     """While the script ran: [seconds since it started, MB resident, CPU seconds so far]."""
@@ -165,6 +170,8 @@ class WorkflowRun(BaseModel):
     workflow_title: str = ""
     sandbox_limit: int | None = None
     """How many sandboxes one account could hold at once when it ran: the line its load is measured against."""
+    lanes: int | None = None
+    """How many sandboxes it used, at most, passing each from one analysis to the next."""
 
     def settle(self) -> None:
         """The overall status, from the nodes'."""

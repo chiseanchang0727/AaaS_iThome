@@ -692,6 +692,11 @@ export interface WorkflowNodeRun {
   cpu_seconds?: number | null
   peak_memory_mb?: number | null
   memory_limit_mb?: number | null
+  /** Which sandbox it ran in: a workflow run passes a few from one analysis to the next. */
+  sandbox?: string | null
+  /** Its sandbox ran another analysis of this run before it (cleaned up in between). */
+  reused?: boolean
+  cleanup_seconds?: number | null
   /** When its script started (ms), and how long it ran. */
   script_at?: string | null
   script_seconds?: number | null
@@ -717,6 +722,8 @@ export interface WorkflowRun {
   workflow_title: string
   /** How many sandboxes one account could hold at once when it ran. */
   sandbox_limit?: number | null
+  /** How many sandboxes it used at most, passing each from one analysis to the next. */
+  lanes?: number | null
 }
 
 /** One item of GET /api/workflows. */
