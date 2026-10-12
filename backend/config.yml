@@ -93,7 +93,8 @@ server:
   default_account: test_user
   # Kept started and ready, so a new conversation skips the ~12s start. They
   # count toward max_sandboxes and are billed while they wait. 0: off.
-  warm_sandboxes: 1
+  # 2: a workflow run's two sandboxes (all but one per account) both start warm.
+  warm_sandboxes: 2
   max_upload_mb: 50
 
 analysis_execution:

@@ -320,8 +320,9 @@ class Counting:
         return self.inner.download_files(paths)
 
 
-def test_a_run_makes_three_calls_to_its_sandbox(tmp_path, monkeypatch):
-    """Make the folder, upload, run: the outputs come back with the run. Big ones are downloaded."""
+def test_a_small_run_is_one_call_to_its_sandbox(tmp_path, monkeypatch):
+    """Clean up, make the folder, write the inputs, run, send the outputs back: one call. Big inputs are
+    uploaded in calls of their own, big outputs downloaded."""
     from analyses import runner
     from analyses.runner import clean_first, run_in_sandbox
     from test_adaptive_runs import RAW
@@ -333,15 +334,29 @@ def test_a_run_makes_three_calls_to_its_sandbox(tmp_path, monkeypatch):
     inputs = {"recent_events.parquet": to_parquet(RAW)}
     result = run_in_sandbox(sandbox, naive(), inputs, scratch, prepare=clean_first(scratch.parent), clean_up=False)
     assert result.ok, result.error
-    assert sandbox.calls == ["execute", "upload", "execute"]
+    assert sandbox.calls == ["execute"]
     assert b"Plotly.newPlot" in result.outputs["sessions.html"] and "@@analysis_output@@" not in result.log
+    assert result.measurements.sandbox.seconds is not None  # the script was still measured, on its own
 
-    monkeypatch.setattr(runner, "INLINE_OUTPUT_BYTES", 10)
+    monkeypatch.setattr(runner, "INLINE_INPUT_BYTES", 10)
+    sandbox.calls.clear()
+    assert run_in_sandbox(sandbox, naive(), inputs, scratch, clean_up=False).ok
+    assert sandbox.calls == ["execute", "upload", "execute"]  # make the folder, upload, run
+
     monkeypatch.setattr(runner, "_EMIT_OUTPUTS", runner._EMIT_OUTPUTS.replace("<=4000000", "<=10"))
     sandbox.calls.clear()
     result = run_in_sandbox(sandbox, naive(), inputs, scratch)
     assert result.ok and b"Plotly.newPlot" in result.outputs["sessions.html"]
-    assert sandbox.calls == ["execute", "upload", "execute", "download", "execute"]  # too big: downloaded; cleaned up
+    assert sandbox.calls == ["execute", "upload", "execute", "download", "execute"]  # downloaded; cleaned up
+
+
+def test_a_failed_setup_says_so(tmp_path):
+    from analyses.runner import run_in_sandbox
+    from test_analyses import shell
+
+    scratch = PurePosixPath(tmp_path) / "work" / "r2"
+    result = run_in_sandbox(shell(tmp_path), naive(), {"recent_events.parquet": b"x"}, scratch, prepare="false && ")
+    assert not result.ok and result.error.startswith("could not make the scratch folder")
 
 
 def test_the_next_analyses_data_is_fetched_while_one_runs(tmp_path, monkeypatch):

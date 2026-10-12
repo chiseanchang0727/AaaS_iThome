@@ -224,10 +224,11 @@ def analyses_api(
             if conversation is None:
                 result = RunResult(ok=False, error=why)
                 return
-            fetched = await fetching
             reused = lane is not None and lane.runs > 0
             record.sandbox, record.sandbox_at, record.reused = conversation_id, now_ms(), reused
             store.save_run(analysis.id, record)
+            # Ready, but the data may still be coming from the database: that wait counts as moving data.
+            fetched = await fetching
             # A reused sandbox is cleaned in the same call that makes this run's folder.
             prepare = clean_first(work_dir / RUN_FOLDER) if reused else ""
             result = await run_once(conversation.sandbox, analysis, record, estimates, fetched, prepare)

@@ -178,10 +178,13 @@ def split_report(output: str) -> tuple[str, dict | None]:
 
 
 def run_measured(
-    sandbox: SandboxBackendProtocol, command: str, timeout: int | None = None, sample_seconds: float | None = None
+    sandbox: SandboxBackendProtocol, command: str, timeout: int | None = None, sample_seconds: float | None = None,
+    setup: str = "",
 ) -> tuple[ExecuteResponse, StepMeasure]:
     """Run `command` in `sandbox`; its result as the agent should see it, and what it cost (with samples
-    over time every `sample_seconds`, if given)."""
+    over time every `sample_seconds`, if given). `setup` runs first, in the same call but not measured
+    (e.g. writing the files `command` needs): one call to the sandbox instead of several. If it fails,
+    `command` does not run and the measure has no report (`run_seconds` is None)."""
 
     def run(cmd: str) -> ExecuteResponse:
         if timeout is not None and execute_accepts_timeout(type(sandbox)):
@@ -189,9 +192,9 @@ def run_measured(
         return sandbox.execute(cmd)
 
     started = time.monotonic()
-    result = run(wrap(command, sample_seconds))
+    result = run(f"{setup} && {wrap(command, sample_seconds)}" if setup else wrap(command, sample_seconds))
     output, report = split_report(result.output)
-    if report is None and result.exit_code == 127 and "python3" in result.output:
+    if report is None and result.exit_code == 127 and "python3" in result.output and not setup:
         result = run(command)  # no python3 in this sandbox: run it unmeasured
         output = result.output
     measure = StepMeasure(

@@ -37,6 +37,19 @@ KILLED = 137
 
 SAMPLE_SECONDS = 0.1
 
+INLINE_INPUT_BYTES = 48_000
+"""Inputs and script up to this size together travel inside the run's command (base64): one call to
+the sandbox for the whole run. A single command-line argument is capped at 128 KB (Linux
+MAX_ARG_STRLEN) and base64 adds a third. Bigger ones are uploaded first, in calls of their own."""
+
+# Writes each file from base64: argv is path, base64, path, base64, ...
+_WRITE_FILES = (
+    "import base64,sys\n"
+    "a=sys.argv[1:]\n"
+    "for p,b in zip(a[::2],a[1::2]):\n"
+    " open(p,'wb').write(base64.b64decode(b))\n"
+)
+
 OUTPUT_MARKER = "@@analysis_output@@"
 INLINE_OUTPUT_BYTES = 4_000_000
 """Output files up to this size come back in the same call as the script's output; bigger ones are
@@ -217,9 +230,10 @@ def run_in_sandbox(
 ) -> RunResult:
     """Put the inputs and script in `scratch`, run it (metered), and collect the outputs. Blocking.
 
-    Three calls to the sandbox: make the folder (after `prepare`, e.g. `clean_first`), upload, run;
-    the outputs come back with the run. `clean_up=False` leaves the folder for whoever closes or
-    cleans the sandbox next, which saves a call."""
+    One call to the sandbox when the inputs are small: `prepare` (e.g. `clean_first`), make the folder,
+    write the inputs and script, then the measured run, whose outputs come back with it. Bigger inputs
+    are uploaded first (two more calls). `clean_up=False` leaves the folder for whoever closes or cleans
+    the sandbox next, which saves a call."""
     started = time.monotonic()
     q = shlex.quote(str(scratch))
 
@@ -227,20 +241,29 @@ def run_in_sandbox(
         return RunResult(seconds=round(time.monotonic() - started, 2), **fields)
 
     try:
-        made = sandbox.execute(f"{prepare}rm -rf {q} && mkdir -p {q}/data {q}/out")
-        if made.exit_code != 0:
-            return done(ok=False, error=f"could not make the scratch folder: {made.output.strip()[-300:]}")
-        uploads = [(str(scratch / "data" / name), content) for name, content in inputs.items()]
-        uploads.append((str(scratch / "analysis.py"), analysis.script.encode()))
-        for response in sandbox.upload_files(uploads):
-            if response.error:
-                return done(ok=False, error=f"could not write {response.path}: {response.error}")
+        files = [(str(scratch / "data" / name), content) for name, content in inputs.items()]
+        files.append((str(scratch / "analysis.py"), analysis.script.encode()))
+        setup = f"{prepare}rm -rf {q} && mkdir -p {q}/data {q}/out"
+        if sum(len(content) for _, content in files) <= INLINE_INPUT_BYTES:
+            pairs = " ".join(f"{shlex.quote(path)} {base64.b64encode(content).decode()}" for path, content in files)
+            setup += f" && python3 -c {shlex.quote(_WRITE_FILES)} {pairs}"
+        else:
+            made = sandbox.execute(setup)
+            if made.exit_code != 0:
+                return done(ok=False, error=f"could not make the scratch folder: {made.output.strip()[-300:]}")
+            for response in sandbox.upload_files(files):
+                if response.error:
+                    return done(ok=False, error=f"could not write {response.path}: {response.error}")
+            setup = ""
 
         script_started = now_ms()
         names = " ".join(shlex.quote(o.file) for o in analysis.outputs)
         command = (f"cd {q} && DATA_DIR={q}/data OUTPUT_DIR={q}/out python3 analysis.py; rc=$?; "
                    f"[ $rc -eq 0 ] && python3 -c {shlex.quote(_EMIT_OUTPUTS)} {q}/out {names}; exit $rc")
-        result, step = run_measured(_real(sandbox), command, sample_seconds=SAMPLE_SECONDS)
+        result, step = run_measured(_real(sandbox), command, sample_seconds=SAMPLE_SECONDS, setup=setup)
+        if setup and step.run_seconds is None and result.exit_code != 0:
+            # The setup failed, so the script never ran (the measure has no report).
+            return done(ok=False, error=f"could not make the scratch folder: {result.output.strip()[-300:]}")
         output, sent = _take_outputs(result.output)
         killed = result.exit_code == KILLED
         cost = Measurements(sandbox=SandboxMeasure(
