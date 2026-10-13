@@ -11,6 +11,13 @@ can. Peak memory is that of the largest single process the command ran.
 
 Measuring must never break a step: if the wrapper cannot run (no python3 in
 the image), the command is run again as it was and comes back unmeasured.
+
+With `sample_seconds` (saved-analysis runs), the wrapper also samples while
+the command runs: the resident memory of its process tree (/proc) and the
+sandbox's CPU time so far (cgroup v2 cpu.stat). A run has a sandbox of its
+own, so that CPU time is the run's. The list stays short: whenever it reaches
+SAMPLE_LIMIT, every other sample is dropped and the interval doubles. Where
+/proc or cgroups are missing (a local shell on macOS), the list stays empty.
 """
 
 import base64
@@ -52,6 +59,68 @@ _WRAPPER = (
     "sys.exit(128+sig if sig else r.returncode)\n"
 )
 
+SAMPLE_LIMIT = 240
+
+# The same, sampling every argv[2] seconds while the command runs. Each sample is
+# [seconds since start, MB resident in the command's process tree, CPU seconds of the sandbox so far].
+_SAMPLING_WRAPPER = (
+    "import base64,json,os,resource,subprocess,sys,time\n"
+    "c=base64.b64decode(sys.argv[1]).decode()\n"
+    "every=float(sys.argv[2])\n"
+    "t=time.monotonic()\n"
+    "p=subprocess.Popen(['bash','-c',c])\n"
+    "def rss(root):\n"
+    " try:\n"
+    "  kids={}\n"
+    "  for d in os.listdir('/proc'):\n"
+    "   if d.isdigit():\n"
+    "    try:\n"
+    "     kids.setdefault(int(open('/proc/'+d+'/stat').read().rsplit(')',1)[1].split()[1]),[]).append(int(d))\n"
+    "    except (OSError,IndexError,ValueError):\n"
+    "     pass\n"
+    "  todo,total=[root],0\n"
+    "  while todo:\n"
+    "   q=todo.pop();todo+=kids.get(q,[])\n"
+    "   try:\n"
+    "    total+=int(open('/proc/%d/statm'%q).read().split()[1])*os.sysconf('SC_PAGE_SIZE')\n"
+    "   except (OSError,IndexError,ValueError):\n"
+    "    pass\n"
+    "  return round(total/1048576,1)\n"
+    " except OSError:\n"
+    "  return None\n"
+    "def cpu():\n"
+    " try:\n"
+    "  for l in open('/sys/fs/cgroup/cpu.stat'):\n"
+    "   if l.startswith('usage_usec'):\n"
+    "    return round(int(l.split()[1])/1e6,3)\n"
+    " except (OSError,ValueError):\n"
+    "  return None\n"
+    "s=[]\n"
+    "while p.poll() is None:\n"
+    " m,u=rss(p.pid),cpu()\n"
+    " if m is not None or u is not None:\n"
+    "  s.append([round(time.monotonic()-t,2),m,u])\n"
+    f" if len(s)>={SAMPLE_LIMIT}:\n"
+    "  s=s[::2];every*=2\n"
+    " try:\n"
+    "  p.wait(timeout=every)\n"
+    " except subprocess.TimeoutExpired:\n"
+    "  pass\n"
+    "u=resource.getrusage(resource.RUSAGE_CHILDREN)\n"
+    "rc=p.returncode\n"
+    "sig=-rc if rc<0 else rc-128 if 128<rc<=192 else None\n"
+    "try:\n"
+    " m=open('/sys/fs/cgroup/memory.max').read().strip();lim=round(int(m)/1048576) if m.isdigit() else None\n"
+    "except OSError:\n"
+    " lim=None\n"
+    "sys.stdout.flush()\n"
+    f"print('\\n{MARKER} '+json.dumps({{'run_seconds':round(time.monotonic()-t,3),"
+    "'cpu_seconds':round(u.ru_utime+u.ru_stime,3),"
+    "'peak_memory_mb':round(u.ru_maxrss/(1048576 if sys.platform=='darwin' else 1024),1),"
+    "'signal':sig,'memory_limit_mb':lim,'samples':s}),flush=True)\n"
+    "sys.exit(128+sig if sig else rc)\n"
+)
+
 
 @dataclass(frozen=True)
 class StepMeasure:
@@ -70,6 +139,8 @@ class StepMeasure:
     """The signal that killed it, if any: 9 is usually the out-of-memory killer."""
     memory_limit_mb: int | None = None
     """The sandbox's memory limit, when it has one."""
+    samples: list[list[float | None]] | None = None
+    """Only when asked for: [seconds since start, MB resident, CPU seconds of the sandbox so far] while it ran."""
 
     @property
     def out_of_memory(self) -> bool:
@@ -79,11 +150,16 @@ class StepMeasure:
         return self.peak_memory_mb >= 0.8 * self.memory_limit_mb
 
     def to_dict(self) -> dict:
-        return asdict(self)
+        found = asdict(self)
+        if found["samples"] is None:
+            del found["samples"]
+        return found
 
 
-def wrap(command: str) -> str:
+def wrap(command: str, sample_seconds: float | None = None) -> str:
     encoded = base64.b64encode(command.encode()).decode()
+    if sample_seconds:
+        return f"python3 -c {shlex.quote(_SAMPLING_WRAPPER)} {encoded} {sample_seconds}"
     return f"python3 -c {shlex.quote(_WRAPPER)} {encoded}"
 
 
@@ -102,9 +178,13 @@ def split_report(output: str) -> tuple[str, dict | None]:
 
 
 def run_measured(
-    sandbox: SandboxBackendProtocol, command: str, timeout: int | None = None
+    sandbox: SandboxBackendProtocol, command: str, timeout: int | None = None, sample_seconds: float | None = None,
+    setup: str = "",
 ) -> tuple[ExecuteResponse, StepMeasure]:
-    """Run `command` in `sandbox`; its result as the agent should see it, and what it cost."""
+    """Run `command` in `sandbox`; its result as the agent should see it, and what it cost (with samples
+    over time every `sample_seconds`, if given). `setup` runs first, in the same call but not measured
+    (e.g. writing the files `command` needs): one call to the sandbox instead of several. If it fails,
+    `command` does not run and the measure has no report (`run_seconds` is None)."""
 
     def run(cmd: str) -> ExecuteResponse:
         if timeout is not None and execute_accepts_timeout(type(sandbox)):
@@ -112,9 +192,9 @@ def run_measured(
         return sandbox.execute(cmd)
 
     started = time.monotonic()
-    result = run(wrap(command))
+    result = run(f"{setup} && {wrap(command, sample_seconds)}" if setup else wrap(command, sample_seconds))
     output, report = split_report(result.output)
-    if report is None and result.exit_code == 127 and "python3" in result.output:
+    if report is None and result.exit_code == 127 and "python3" in result.output and not setup:
         result = run(command)  # no python3 in this sandbox: run it unmeasured
         output = result.output
     measure = StepMeasure(

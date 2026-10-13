@@ -24,6 +24,10 @@ import type {
   PastConversationSummary,
   SystemRun,
   SystemRunInfo,
+  Workflow,
+  WorkflowBody,
+  WorkflowRun,
+  WorkflowSummary,
 } from './types'
 
 /** An error the backend explained; `message` is fit to show the user. */
@@ -238,4 +242,50 @@ export async function getPastConversation(id: string): Promise<PastConversation>
 /** Delete a saved conversation for good: its history and the files it made. */
 export async function deletePastConversation(id: string): Promise<void> {
   await json(await fetch(`/api/conversations/${encodeURIComponent(id)}/history`, { method: 'DELETE', headers: accountHeaders() }))
+}
+
+export async function listWorkflows(): Promise<WorkflowSummary[]> {
+  return json(await fetch('/api/workflows'))
+}
+
+export async function getWorkflow(id: string): Promise<Workflow> {
+  return json(await fetch(`/api/workflows/${encodeURIComponent(id)}`))
+}
+
+export async function createWorkflow(body: WorkflowBody): Promise<Workflow> {
+  return json(
+    await fetch('/api/workflows', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
+}
+
+export async function saveWorkflow(id: string, body: WorkflowBody): Promise<Workflow> {
+  return json(
+    await fetch(`/api/workflows/${encodeURIComponent(id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  )
+}
+
+export async function deleteWorkflow(id: string): Promise<void> {
+  await json(await fetch(`/api/workflows/${encodeURIComponent(id)}`, { method: 'DELETE' }))
+}
+
+export async function runWorkflow(id: string): Promise<WorkflowRun> {
+  return json(await fetch(`/api/workflows/${encodeURIComponent(id)}/runs`, { method: 'POST' }))
+}
+
+/** A report node's page for one run: one HTML page with every chart of its batches. */
+export function workflowReportUrl(id: string, runId: string, nodeId: string): string {
+  return `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/reports/${encodeURIComponent(nodeId)}`
+}
+
+/** One workflow run's load: every batch and analysis over time, as one HTML page. Not the results. */
+export function workflowLoadUrl(id: string, runId: string): string {
+  return `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/load`
 }

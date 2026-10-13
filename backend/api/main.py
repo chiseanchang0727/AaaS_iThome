@@ -14,15 +14,18 @@ from analyses import AnalysisStore
 from analyses.budget import Limits
 from evals.system.judges import Judges
 from sandboxes import get_provider
+from workflows import WorkflowStore
 
-from .analyses import analyses_router
+from .analyses import analyses_api
 from .app import create_app
 from .compare import compare_router
 from .datasets import datasets_router
 from .evals import evals_router, system_router
 from .history import HistoryStore
 from .load import load_router
+from .vendor import vendor_router
 from .wiring import make_context_filter, make_manager, store
+from .workflows import workflows_router
 
 # role and server mark this run's sandboxes, so the next run can delete
 # any it leaves behind (see ConversationManager.clean_up_leftovers).
@@ -32,6 +35,15 @@ manager = make_manager(
 )
 
 history = HistoryStore(cfg.server.history_dir)
+
+saved_analyses = AnalysisStore(cfg.server.analyses_dir)
+analyses = analyses_api(
+    saved_analyses, manager,
+    query=export_rows, query_rows=lambda sql: query_database(sql, raw=True),
+    read_dataset=dataset_reader(store.registry, cfg.server.uploads_dir / "files"),
+    work_dir=cfg.sandbox.data_dir.parent, account=cfg.server.default_account,
+    estimate=estimate_query, count=count_query, limits=Limits.from_config(cfg),
+)
 
 app = create_app(
     manager,
@@ -54,13 +66,13 @@ app = create_app(
             make_judges=lambda: Judges(cfg.agent.model),
         ),
         load_router(history),
-        analyses_router(
-            AnalysisStore(cfg.server.analyses_dir), manager,
-            query=export_rows, query_rows=lambda sql: query_database(sql, raw=True),
-            read_dataset=dataset_reader(store.registry, cfg.server.uploads_dir / "files"),
-            work_dir=cfg.sandbox.data_dir.parent, account=cfg.server.default_account,
-            estimate=estimate_query, count=count_query, limits=Limits.from_config(cfg),
-        ),
+        analyses.router,
+        vendor_router(cfg.server.artifacts_dir.parent / "vendor"),
+        workflows_router(WorkflowStore(cfg.server.workflows_dir), saved_analyses, analyses,
+                         query_rows=lambda sql: query_database(sql, raw=True),
+                         sandbox_limit=cfg.server.max_sandboxes_per_account,
+                         # One sandbox stays free for chat while a workflow runs.
+                         lanes=max(1, cfg.server.max_sandboxes_per_account - 1)),
     ],
     history=history,
     default_account=cfg.server.default_account,

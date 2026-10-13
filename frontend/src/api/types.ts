@@ -519,8 +519,10 @@ export interface AnalysisRun {
   started_at: string
   /** needs_optimization: a hard limit stopped it before it could finish (see findings). */
   status: 'running' | 'done' | 'failed' | 'needs_optimization'
-  /** "save": the test run when it was saved; "run": someone clicked Run. */
-  trigger: 'save' | 'run'
+  /** "save": the test run when it was saved; "run": someone clicked Run; "workflow": a workflow ran it. */
+  trigger: 'save' | 'run' | 'workflow'
+  /** For a run started by a workflow: that workflow run's id. */
+  workflow_run?: string | null
   seconds: number | null
   outputs: string[]
   error: string | null
@@ -620,3 +622,130 @@ export interface PastConversation {
 
 /** One version of a saved analysis's recipe (GET /api/analyses/{id}/versions). */
 export type AnalysisVersion = Omit<Analysis, 'runs' | 'running' | 'optimizing' | 'limits'>
+
+/** Where a node sits on a workflow's canvas. */
+export interface NodePosition {
+  x: number
+  y: number
+}
+
+/** One saved analysis in a workflow, with the tables it reads instead of its own. */
+export interface WorkflowAnalysisNode {
+  kind: 'analysis'
+  id: string
+  analysis_id: string
+  sources: Record<string, string>
+  position: NodePosition
+}
+
+/** Collects the analyses connected to it: their status and outputs, in one report. */
+export interface WorkflowBatchNode {
+  kind: 'batch'
+  id: string
+  title: string
+  position: NodePosition
+}
+
+/** Turns the batches connected to it into one page, a section each. */
+export interface WorkflowReportNode {
+  kind: 'report'
+  id: string
+  title: string
+  position: NodePosition
+}
+
+export type WorkflowNode = WorkflowAnalysisNode | WorkflowBatchNode | WorkflowReportNode
+
+/** From an analysis node to a batch node, or from a batch node to a report node. */
+export interface WorkflowEdge {
+  source: string
+  target: string
+}
+
+/** What PUT/POST /api/workflows take. */
+export interface WorkflowBody {
+  title: string
+  nodes: WorkflowNode[]
+  edges: WorkflowEdge[]
+}
+
+export interface WorkflowNodeRun {
+  node_id: string
+  analysis_id: string
+  title: string
+  sources: Record<string, string>
+  version: number | null
+  /** The analysis run; its outputs are served from it. */
+  run_id: string | null
+  /** waiting: in the workflow, for one of the account's sandboxes to be free. */
+  status: AnalysisRun['status'] | 'waiting'
+  error: string | null
+  seconds: number | null
+  outputs: string[]
+  /** When it was asked for, when its sandbox was ready (null: never), and when it ended; ms. */
+  queued_at?: string | null
+  sandbox_at?: string | null
+  finished_at?: string | null
+  /** Moved from the database into its sandbox, all inputs together. */
+  rows?: number | null
+  bytes?: number | null
+  cpu_seconds?: number | null
+  peak_memory_mb?: number | null
+  memory_limit_mb?: number | null
+  /** Which sandbox it ran in: a workflow run passes a few from one analysis to the next. */
+  sandbox?: string | null
+  /** Its sandbox ran another analysis of this run before it (cleaned up in between). */
+  reused?: boolean
+  cleanup_seconds?: number | null
+  /** When its script started (ms), and how long it ran. */
+  script_at?: string | null
+  script_seconds?: number | null
+  /** While the script ran: [seconds since it started, MB resident, CPU seconds so far]. */
+  samples?: (number | null)[][]
+}
+
+export interface WorkflowRun {
+  id: string
+  workflow_id: string
+  started_at: string
+  finished_at: string | null
+  seconds: number | null
+  /** done: every node done; failed: none done; partly_done: some of each. */
+  status: 'running' | 'done' | 'partly_done' | 'failed'
+  nodes: WorkflowNodeRun[]
+  /** Batch node id -> its analysis node ids, as the workflow was when it ran. */
+  batches: Record<string, string[]>
+  /** Report node id -> its batch node ids, as the workflow was when it ran. */
+  reports: Record<string, string[]>
+  /** Batch and report node id -> its title, as the workflow was when it ran. */
+  titles: Record<string, string>
+  workflow_title: string
+  /** How many sandboxes one account could hold at once when it ran. */
+  sandbox_limit?: number | null
+  /** How many sandboxes it used at most, passing each from one analysis to the next. */
+  lanes?: number | null
+}
+
+/** One item of GET /api/workflows. */
+export interface WorkflowSummary {
+  id: string
+  title: string
+  created_at: string
+  updated_at: string | null
+  analyses: number
+  batches: number
+  reports: number
+  last_run: WorkflowRun | null
+}
+
+/** GET /api/workflows/{id}. */
+export interface Workflow extends WorkflowBody {
+  id: string
+  created_at: string
+  updated_at: string | null
+  /** For each analysis a node uses: its title, version and tables, or null when it was deleted. */
+  analyses: Record<string, { title: string; version: number; tables: string[] } | null>
+  running: boolean
+  /** Newest first. */
+  runs: WorkflowRun[]
+}

@@ -62,6 +62,11 @@ def now() -> str:
     return datetime.now(UTC).isoformat(timespec="seconds").replace("+00:00", "Z")
 
 
+def now_ms() -> str:
+    """Now, to the millisecond: for timelines, where runs a second apart must not look the same."""
+    return datetime.now(UTC).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
 class InputMeasure(BaseModel):
     """What one input cost, or would cost: how much data crossed from the database into the sandbox."""
 
@@ -90,6 +95,10 @@ class SandboxMeasure(BaseModel):
     memory_limit_mb: int | None = None
     killed: bool = False
     """Killed by SIGKILL: almost always out of memory."""
+    started_at: str | None = None
+    """When the script started (ms): after the inputs were fetched and copied into the sandbox."""
+    samples: list[list[float | None]] = []
+    """While it ran: [seconds since it started, MB resident, CPU seconds of the sandbox so far]."""
 
 
 class Measurements(BaseModel):
@@ -129,8 +138,10 @@ class RunRecord(BaseModel):
     started_at: str
     status: Literal["running", "done", "failed", "needs_optimization"]
     """needs_optimization: a hard limit stopped it (findings say which); nothing ran past that point."""
-    trigger: Literal["save", "run"]
-    """"save": the test run when it was saved; "run": someone clicked Run."""
+    trigger: Literal["save", "run", "workflow"]
+    """"save": the test run when it was saved; "run": someone clicked Run; "workflow": a workflow ran it."""
+    workflow_run: str | None = None
+    """For a run started by a workflow: that workflow run's id."""
     seconds: float | None = None
     outputs: list[str] = []
     error: str | None = None
@@ -150,6 +161,19 @@ class RunRecord(BaseModel):
     "message"}."""
     optimized_from: int | None = None
     """Set on the run made right after an optimization: the version it replaced."""
+    queued_at: str | None = None
+    """When it was asked for (ms). Then the size check, the wait for a free sandbox, and its start-up."""
+    sandbox_at: str | None = None
+    """When its sandbox was ready (ms); None if it never got one (stopped by the size check, or none free)."""
+    finished_at: str | None = None
+    """When it ended and gave its sandbox back (ms)."""
+    sandbox: str | None = None
+    """Which sandbox it ran in (the conversation that held it). Runs of one workflow share a few, one after
+    another; a run on its own has its own."""
+    reused: bool = False
+    """It ran in a sandbox an earlier run of the same workflow had used, after a clean-up."""
+    cleanup_seconds: float | None = None
+    """How long that clean-up took."""
 
 
 class Analysis(BaseModel):

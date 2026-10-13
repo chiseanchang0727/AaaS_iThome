@@ -231,6 +231,8 @@ uploads/
 conversations/
 # Saved analyses and their runs' outputs (backend/saved_analyses, server.analyses_dir)
 saved_analyses/
+# Workflows and their runs (backend/saved_workflows, server.workflows_dir)
+saved_workflows/
 
 # Article drafts, kept locally
 articles/

@@ -14,6 +14,7 @@ rows, size and query time, and the script's time, CPU and peak memory.
 """
 
 import asyncio
+import base64
 import io
 import shlex
 import time
@@ -28,11 +29,68 @@ from datasources import TooManyRows
 from sandboxes.metering import run_measured
 
 from .budget import Limits, check_estimates, check_run, needs_optimization, over_estimate
-from .models import Analysis, Finding, InputMeasure, Measurements, QueryInput, SandboxMeasure
+from .models import Analysis, Finding, InputMeasure, Measurements, QueryInput, SandboxMeasure, now_ms
 from .sources import swap_tables, tables
 
 LOG_CHARS = 4000
 KILLED = 137
+
+SAMPLE_SECONDS = 0.1
+
+INLINE_INPUT_BYTES = 48_000
+"""Inputs and script up to this size together travel inside the run's command (base64): one call to
+the sandbox for the whole run. A single command-line argument is capped at 128 KB (Linux
+MAX_ARG_STRLEN) and base64 adds a third. Bigger ones are uploaded first, in calls of their own."""
+
+# Writes each file from base64: argv is path, base64, path, base64, ...
+_WRITE_FILES = (
+    "import base64,sys\n"
+    "a=sys.argv[1:]\n"
+    "for p,b in zip(a[::2],a[1::2]):\n"
+    " open(p,'wb').write(base64.b64decode(b))\n"
+)
+
+OUTPUT_MARKER = "@@analysis_output@@"
+INLINE_OUTPUT_BYTES = 4_000_000
+"""Output files up to this size come back in the same call as the script's output; bigger ones are
+downloaded afterwards. Each call to a sandbox takes about a second: fewer calls, faster runs."""
+
+# Run after the script, in the same command: each output file, base64 on one marked line, or "-" when
+# it is missing or too big to send this way (then it is downloaded).
+_EMIT_OUTPUTS = (
+    "import base64,os,sys\n"
+    "d=sys.argv[1]\n"
+    "for n in sys.argv[2:]:\n"
+    " p=os.path.join(d,n)\n"
+    f" ok=os.path.isfile(p) and os.path.getsize(p)<={INLINE_OUTPUT_BYTES}\n"
+    f" print('{OUTPUT_MARKER} '+n+' '+(base64.b64encode(open(p,'rb').read()).decode() if ok else '-'))\n"
+)
+
+
+def clean_first(root: PurePosixPath) -> str:
+    """A command prefix that stops what earlier runs left running under `root` and deletes it: for a
+    sandbox passed from one run to the next, in the same call that makes the next run's folder."""
+    r = shlex.quote(str(root))
+    return (f"root={r}; for p in /proc/[0-9]*; do c=$(readlink \"$p/cwd\" 2>/dev/null) || continue; "
+            f'case "$c" in "$root"*) kill -9 "${{p#/proc/}}" 2>/dev/null;; esac; done; rm -rf "$root" && ')
+
+
+def _take_outputs(output: str) -> tuple[str, dict[str, bytes | None]]:
+    """The script's output without the marked lines, and each file sent on one (None: download it)."""
+    sent: dict[str, bytes | None] = {}
+    kept = []
+    for line in output.splitlines(keepends=True):
+        if line.startswith(OUTPUT_MARKER + " "):
+            parts = line.split()
+            if len(parts) == 3:
+                try:
+                    sent[parts[1]] = None if parts[2] == "-" else base64.b64decode(parts[2])
+                except ValueError:
+                    sent[parts[1]] = None
+                continue
+        kept.append(line)
+    return "".join(kept), sent
+"""How often a run samples its memory and CPU while the script runs (for the load charts)."""
 """Exit code of a command killed by SIGKILL: almost always out of memory."""
 
 Query = Callable[[str], Awaitable[bytes]]
@@ -167,9 +225,15 @@ def _real(sandbox: SandboxBackendProtocol) -> SandboxBackendProtocol:
 
 
 def run_in_sandbox(
-    sandbox: SandboxBackendProtocol, analysis: Analysis, inputs: dict[str, bytes], scratch: PurePosixPath
+    sandbox: SandboxBackendProtocol, analysis: Analysis, inputs: dict[str, bytes], scratch: PurePosixPath,
+    *, prepare: str = "", clean_up: bool = True,
 ) -> RunResult:
-    """Put the inputs and script in `scratch`, run it (metered), and collect the outputs. Blocking."""
+    """Put the inputs and script in `scratch`, run it (metered), and collect the outputs. Blocking.
+
+    One call to the sandbox when the inputs are small: `prepare` (e.g. `clean_first`), make the folder,
+    write the inputs and script, then the measured run, whose outputs come back with it. Bigger inputs
+    are uploaded first (two more calls). `clean_up=False` leaves the folder for whoever closes or cleans
+    the sandbox next, which saves a call."""
     started = time.monotonic()
     q = shlex.quote(str(scratch))
 
@@ -177,42 +241,62 @@ def run_in_sandbox(
         return RunResult(seconds=round(time.monotonic() - started, 2), **fields)
 
     try:
-        made = sandbox.execute(f"rm -rf {q} && mkdir -p {q}/data {q}/out")
-        if made.exit_code != 0:
-            return done(ok=False, error=f"could not make the scratch folder: {made.output.strip()[-300:]}")
-        uploads = [(str(scratch / "data" / name), content) for name, content in inputs.items()]
-        uploads.append((str(scratch / "analysis.py"), analysis.script.encode()))
-        for response in sandbox.upload_files(uploads):
-            if response.error:
-                return done(ok=False, error=f"could not write {response.path}: {response.error}")
+        files = [(str(scratch / "data" / name), content) for name, content in inputs.items()]
+        files.append((str(scratch / "analysis.py"), analysis.script.encode()))
+        setup = f"{prepare}rm -rf {q} && mkdir -p {q}/data {q}/out"
+        if sum(len(content) for _, content in files) <= INLINE_INPUT_BYTES:
+            pairs = " ".join(f"{shlex.quote(path)} {base64.b64encode(content).decode()}" for path, content in files)
+            setup += f" && python3 -c {shlex.quote(_WRITE_FILES)} {pairs}"
+        else:
+            made = sandbox.execute(setup)
+            if made.exit_code != 0:
+                return done(ok=False, error=f"could not make the scratch folder: {made.output.strip()[-300:]}")
+            for response in sandbox.upload_files(files):
+                if response.error:
+                    return done(ok=False, error=f"could not write {response.path}: {response.error}")
+            setup = ""
 
-        result, step = run_measured(_real(sandbox), f"cd {q} && DATA_DIR={q}/data OUTPUT_DIR={q}/out python3 analysis.py")
+        script_started = now_ms()
+        names = " ".join(shlex.quote(o.file) for o in analysis.outputs)
+        command = (f"cd {q} && DATA_DIR={q}/data OUTPUT_DIR={q}/out python3 analysis.py; rc=$?; "
+                   f"[ $rc -eq 0 ] && python3 -c {shlex.quote(_EMIT_OUTPUTS)} {q}/out {names}; exit $rc")
+        result, step = run_measured(_real(sandbox), command, sample_seconds=SAMPLE_SECONDS, setup=setup)
+        if setup and step.run_seconds is None and result.exit_code != 0:
+            # The setup failed, so the script never ran (the measure has no report).
+            return done(ok=False, error=f"could not make the scratch folder: {result.output.strip()[-300:]}")
+        output, sent = _take_outputs(result.output)
         killed = result.exit_code == KILLED
         cost = Measurements(sandbox=SandboxMeasure(
             seconds=step.run_seconds or step.seconds, cpu_seconds=step.cpu_seconds,
             peak_memory_mb=step.peak_memory_mb, memory_limit_mb=step.memory_limit_mb, killed=killed,
+            started_at=script_started, samples=step.samples or [],
         ))
-        log = _clip(result.output)
+        log = _clip(output)
         if result.exit_code != 0:
             why = "it ran out of memory (killed)" if killed else f"the script failed (exit code {result.exit_code})"
             return done(ok=False, error=why, log=log, killed=killed, measurements=cost)
 
-        paths = [str(scratch / "out" / o.file) for o in analysis.outputs]
-        outputs, missing = {}, []
-        for o, response in zip(analysis.outputs, sandbox.download_files(paths)):
-            if response.error or response.content is None:
-                missing.append(o.file)
-            else:
-                outputs[o.file] = response.content
+        outputs = {name: content for name, content in sent.items() if content is not None}
+        # Missing from the run's output (too big, or the output was cut short): download those.
+        wanted = [o.file for o in analysis.outputs if o.file not in outputs]
+        missing = []
+        if wanted:
+            responses = sandbox.download_files([str(scratch / "out" / name) for name in wanted])
+            for name, response in zip(wanted, responses):
+                if response.error or response.content is None:
+                    missing.append(name)
+                else:
+                    outputs[name] = response.content
         if missing:
             return done(ok=False, error=f"the script did not write {', '.join(missing)} to $OUTPUT_DIR",
                         log=log, measurements=cost)
         return done(ok=True, log=log, outputs=outputs, measurements=cost)
     finally:
-        try:
-            sandbox.execute(f"rm -rf {q}")
-        except Exception:
-            pass
+        if clean_up:
+            try:
+                sandbox.execute(f"rm -rf {q}")
+            except Exception:
+                pass
 
 
 async def run(
@@ -227,11 +311,16 @@ async def run(
     limits: Limits | None = None,
     estimates: list[InputMeasure] | None = None,
     count: Count | None = None,
+    fetched: Fetched | None = None,
+    prepare: str = "",
+    clean_up: bool = True,
 ) -> RunResult:
     """Fetch the inputs (reading `sources` instead of their tables), then run the script in `sandbox`.
 
     With `estimate` (or `estimates` already made) and `limits`: stop before exporting
     when an estimate breaks a hard limit, and judge what the run cost (RunResult.findings).
+    `fetched`: the inputs, already fetched (while the sandbox started, or the one before ran).
+    `prepare`, `clean_up`: as for run_in_sandbox.
     """
     started = time.monotonic()
     if estimates is None:
@@ -242,13 +331,15 @@ async def run(
             return RunResult(ok=False, error=stop[0].reason, findings=stop, measurements=Measurements(inputs=estimates),
                              seconds=round(time.monotonic() - started, 2))
 
-    fetched = await fetch_inputs(analysis, query, read_dataset, sources, estimates)
+    if fetched is None:
+        fetched = await fetch_inputs(analysis, query, read_dataset, sources, estimates)
     if fetched.problem:
         return RunResult(ok=False, error=fetched.problem, seconds=round(time.monotonic() - started, 2),
                          measurements=Measurements(inputs=fetched.measures),
                          findings=[fetched.too_large] if fetched.too_large else [])
 
-    result = await asyncio.to_thread(run_in_sandbox, sandbox, analysis, fetched.files, scratch)
+    result = await asyncio.to_thread(run_in_sandbox, sandbox, analysis, fetched.files, scratch,
+                                     prepare=prepare, clean_up=clean_up)
     result.seconds = round(time.monotonic() - started, 2)
     result.measurements = Measurements(inputs=fetched.measures, sandbox=result.measurements.sandbox)
     if limits is not None:
