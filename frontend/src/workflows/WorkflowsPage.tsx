@@ -45,7 +45,6 @@ import type {
   WorkflowSummary,
 } from '../api/types'
 import { ArtifactView } from '../chat/ArtifactView'
-import { Suggestions } from './Suggestions'
 
 const POLL_MS = 2000
 const DRAG_TYPE = 'application/x-saved-analysis'
@@ -361,8 +360,8 @@ function Editor({ id }: { id: string | null }) {
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [shownRun, setShownRun] = useState<string | null>(null)
-  // Below the canvas: a run's results, its performance (time and resources), or the advisor's suggestions.
-  const [view, setView] = useState<'results' | 'performance' | 'suggestions'>('results')
+  // Below the canvas: a run's results, or its performance (time and resources). Never both on one page.
+  const [view, setView] = useState<'results' | 'performance'>('results')
   const [options, setOptions] = useState<Record<string, SourceOption[]>>({})
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -751,18 +750,13 @@ function Editor({ id }: { id: string | null }) {
             <button role="tab" aria-selected={view === 'performance'} className={view === 'performance' ? 'active' : ''} onClick={() => setView('performance')}>
               Performance
             </button>
-            <button role="tab" aria-selected={view === 'suggestions'} className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')}>
-              Suggestions
-            </button>
           </div>
           <h2>
-            {view === 'suggestions'
-              ? 'Suggestions'
-              : view === 'performance'
+            {view === 'performance'
               ? 'Performance of this run'
               : below ? `${below.kind === 'report' ? 'Report' : 'Batch'}: ${belowTitle}` : 'Results'}
           </h2>
-          {view !== 'suggestions' && detail && detail.runs.length > 0 && (
+          {detail && detail.runs.length > 0 && (
             <label className="field inline">
               Run
               <select value={run?.id ?? ''} onChange={(e) => setShownRun(e.target.value)}>
@@ -775,26 +769,8 @@ function Editor({ id }: { id: string | null }) {
             </label>
           )}
         </div>
-        {view !== 'suggestions' && run && <RunSummary run={run} />}
-        {view === 'suggestions' ? (
-          id ? (
-            <Suggestions
-              workflowId={id}
-              titles={Object.fromEntries(nodes.filter((n) => n.type === 'analysis').map((n) => [n.id, n.data.title]))}
-              hasRuns={(detail?.runs.length ?? 0) > 0}
-              blocked={running ? 'The workflow is running: apply it when the run ends.' : dirty ? 'Save your changes first.' : null}
-              onApplied={(workflow) => {
-                const shape = toFlow(workflow)
-                setNodes(shape.nodes)
-                setEdges(shape.edges)
-                setSettings(workflow.settings ?? { lanes: null })
-                setDetail(workflow)
-              }}
-            />
-          ) : (
-            <p className="muted">Save the workflow and run it first.</p>
-          )
-        ) : !run ? (
+        {run && <RunSummary run={run} />}
+        {!run ? (
           <p className="muted">Not run yet. Run the workflow to see its {view === 'performance' ? 'performance' : 'results'} here.</p>
         ) : view === 'performance' ? (
           id && <ArtifactView artifact={{ name: 'Performance.html', kind: 'html', url: workflowPerformanceUrl(id, run.id) }} />

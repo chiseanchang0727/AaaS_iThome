@@ -2,7 +2,6 @@
 
     <root>/<id>/workflow.json           the workflow (models.Workflow)
     <root>/<id>/runs/<run id>.json      each run (models.WorkflowRun)
-    <root>/<id>/advice/<id>.json        each time the advisor was asked (advisor.AdviceRecord)
 
 A run's outputs are not copied: each node's files stay with its analysis run.
 """
@@ -11,7 +10,6 @@ import re
 import shutil
 from pathlib import Path
 
-from .advisor import AdviceRecord
 from .models import Workflow, WorkflowRun
 
 _ID = re.compile(r"^[a-z0-9]{1,40}$")
@@ -73,33 +71,6 @@ class WorkflowStore:
             return []
         found = [WorkflowRun.model_validate_json(p.read_text(encoding="utf-8")) for p in folder.glob("*.json")]
         return sorted(found, key=lambda r: r.id, reverse=True)
-
-    def save_advice(self, advice: AdviceRecord) -> None:
-        if not _RUN_ID.match(advice.id):
-            raise KeyError(advice.id)
-        folder = self._dir(advice.workflow_id) / "advice"
-        folder.mkdir(parents=True, exist_ok=True)
-        (folder / f"{advice.id}.json").write_text(advice.model_dump_json(indent=2), encoding="utf-8")
-
-    def advice(self, workflow_id: str) -> list[AdviceRecord]:
-        """Newest first."""
-        try:
-            folder = self._dir(workflow_id) / "advice"
-        except KeyError:
-            return []
-        if not folder.is_dir():
-            return []
-        found = [AdviceRecord.model_validate_json(p.read_text(encoding="utf-8")) for p in folder.glob("*.json")]
-        return sorted(found, key=lambda a: a.id, reverse=True)
-
-    def get_advice(self, workflow_id: str, advice_id: str) -> AdviceRecord | None:
-        if not _RUN_ID.match(advice_id):
-            return None
-        try:
-            path = self._dir(workflow_id) / "advice" / f"{advice_id}.json"
-        except KeyError:
-            return None
-        return AdviceRecord.model_validate_json(path.read_text(encoding="utf-8")) if path.is_file() else None
 
     def get_run(self, workflow_id: str, run_id: str) -> WorkflowRun | None:
         if not _RUN_ID.match(run_id):
