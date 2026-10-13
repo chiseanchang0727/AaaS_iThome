@@ -99,14 +99,15 @@ def test_a_workflow_runs_its_connected_analyses_in_parallel_and_the_batch_collec
     with TestClient(app) as client:
         page = client.get(f"/api/workflows/{workflow['id']}/runs/{run['id']}/reports/report")
         missing = client.get(f"/api/workflows/{workflow['id']}/runs/{run['id']}/reports/batch")
-        load = client.get(f"/api/workflows/{workflow['id']}/runs/{run['id']}/load")
-        no_run = client.get(f"/api/workflows/{workflow['id']}/runs/20990101-000000000-zzzz/load")
+        load = client.get(f"/api/workflows/{workflow['id']}/runs/{run['id']}/performance")
+        old_address = client.get(f"/api/workflows/{workflow['id']}/runs/{run['id']}/load")
+        no_run = client.get(f"/api/workflows/{workflow['id']}/runs/20990101-000000000-zzzz/performance")
     assert page.status_code == 200 and page.headers["content-security-policy"] == "sandbox allow-scripts"
     text = page.text
     assert "<h1>Sessions report</h1>" in text and "<h2>Both tables</h2>" in text
     assert "Sessions on both tables" in text and "1 of 2 analyses done" in text
     assert "on events → events_big" in text and "needs optimization" in text
-    assert "<h2>Load</h2>" not in text and "Load of this batch" not in text  # the results only
+    assert "<h2>Whole run</h2>" not in text and "Performance of this batch" not in text  # the results only
     # The chart is embedded, escaped, in a sandboxed frame: the page stands on its own.
     assert '<iframe sandbox="allow-scripts" title="sessions.html" srcdoc="' in text and "Plotly.newPlot(&quot;c&quot;" in text
     assert missing.status_code == 404
@@ -114,11 +115,12 @@ def test_a_workflow_runs_its_connected_analyses_in_parallel_and_the_batch_collec
     # The load is a page of its own: the whole run, each batch, each analysis.
     assert load.status_code == 200 and load.headers["content-security-policy"] == "sandbox allow-scripts"
     text = load.text
-    assert "<h1>Load: Sessions on both tables</h1>" in text and "<h2>Load</h2>" in text
+    assert "<h1>Performance: Sessions on both tables</h1>" in text and "<h2>Whole run</h2>" in text
+    assert old_address.status_code == 200 and old_address.text == text  # links made before still work
     assert "sandboxes busy at the peak" in text and "11 rows" in text
     assert 'aria-label="Analyses in a sandbox and waiting for one, over time; at most 1 in sandboxes at once"' in text
     assert "no sandbox" in text  # the big one's bar
-    assert "<h2>Both tables</h2>" in text and "Load of this batch" in text
+    assert "<h2>Both tables</h2>" in text and "Performance of this batch" in text
     assert "<iframe" not in text  # no results here
     assert no_run.status_code == 404
 
@@ -157,7 +159,7 @@ def test_analyses_pass_a_sandbox_on_instead_of_renting_one_each(tmp_path):
     assert app.state.manager.get(first["sandbox"]) is None  # given back when the queue was empty
 
     with TestClient(app) as client:
-        load = client.get(f"/api/workflows/{run['workflow_id']}/runs/{run['id']}/load").text
+        load = client.get(f"/api/workflows/{run['workflow_id']}/runs/{run['id']}/performance").text
     assert "<h4>Sandboxes over time</h4>" in load and 'aria-label="Each sandbox over time: 1 sandbox for 2 analyses"' in load
     assert "<b>1</b><span>sandboxes started, for 2 analyses</span>" in load
     assert "this workflow&#x27;s sandboxes: 1" in load and "· reused" in load
@@ -298,7 +300,7 @@ def test_memory_and_cpu_over_time():
     assert analysis_load(node_at("c", 0, 1, 2)) == ""  # no samples, no charts
 
     block = batch_load(WorkflowRun(id="r", workflow_id="w", started_at="t", sandbox_limit=3), [a], [a, b])
-    assert "Load of this batch" in block and "300 MB" in block and "highest 300 MB" in block
+    assert "Performance of this batch" in block and "300 MB" in block and "highest 300 MB" in block
 
 
 class Counting:

@@ -386,10 +386,10 @@ def _facts_list(items: list[tuple[str, str]]) -> str:
 
 
 def run_load(run: WorkflowRun, nodes: list[NodeRun], groups: list[tuple[str | None, list[NodeRun]]]) -> str:
-    """The Load region for the whole run (or every batch a report shows): numbers, the charts, the bars by batch."""
+    """The whole run's region of the performance page: numbers, the charts, the bars by batch."""
     found = phases(nodes)
     limit, limit_label = limit_of(run)
-    parts = ['<section class="load"><h2>Load</h2>', _facts_list(facts(nodes, found, limit))]
+    parts = ['<section class="load"><h2>Whole run</h2>', _facts_list(facts(nodes, found, limit))]
     if not found:
         parts.append('<p class="muted">The timing of each analysis was not recorded for this run: '
                      "only runs from now on have load charts.</p></section>")
@@ -431,7 +431,7 @@ def batch_load(run: WorkflowRun, members: list[NodeRun], all_nodes: list[NodeRun
     if not found:
         return ""
     limit, limit_label = limit_of(run)
-    parts = ['<div class="batch-load"><h3>Load of this batch</h3>', _facts_list(facts(members, found, limit)),
+    parts = ['<div class="batch-load"><h3>Performance of this batch</h3>', _facts_list(facts(members, found, limit)),
              '<div class="pair"><div>', "<h4>Analyses in sandboxes</h4>",
              counts_chart(found, end, limit, height=170, width=600, limit_label=limit_label),
              "</div><div>"]

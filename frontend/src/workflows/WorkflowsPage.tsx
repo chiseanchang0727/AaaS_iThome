@@ -31,7 +31,7 @@ import {
   listWorkflows,
   runWorkflow,
   saveWorkflow,
-  workflowLoadUrl,
+  workflowPerformanceUrl,
   workflowReportUrl,
 } from '../api/client'
 import type {
@@ -74,6 +74,30 @@ function newId(prefix: string): string {
 function onTables(sources: Record<string, string>): string {
   const swaps = Object.entries(sources).filter(([from, to]) => from !== to)
   return swaps.length ? swaps.map(([from, to]) => `${from} → ${to}`).join(', ') : 'its saved tables'
+}
+
+/** How long a run took, e.g. "16 s"; empty while it runs. */
+function took(run: WorkflowRun): string {
+  return run.seconds === null ? '' : `${Math.round(run.seconds)} s`
+}
+
+/** How many sandboxes a run started: its analyses share a few; older runs had one each. */
+function sandboxesStarted(run: WorkflowRun): number {
+  return new Set(run.nodes.filter((n) => n.sandbox_at).map((n) => n.sandbox ?? n.node_id)).size
+}
+
+/** One line about a run: how long it took, how many analyses, how many sandboxes. */
+function RunSummary({ run }: { run: WorkflowRun }) {
+  const sandboxes = sandboxesStarted(run)
+  const analyses = run.nodes.length
+  return (
+    <p className="wf-run-summary" aria-label="Run summary">
+      {run.status === 'running' ? <b>Running…</b> : <b>Took {took(run)}</b>}
+      {` · ${analyses === 1 ? '1 analysis' : `${analyses} analyses`}`}
+      {sandboxes > 0 && ` · ${sandboxes === 1 ? '1 sandbox' : `${sandboxes} sandboxes`}`}
+      {run.status !== 'done' && run.status !== 'running' && ` · ${STATUS_TEXT[run.status]}`}
+    </p>
+  )
 }
 
 function StatusPill({ status }: { status: Status | undefined }) {
@@ -235,7 +259,8 @@ function WorkflowList() {
                   {w.reports === 1 ? '1 report' : `${w.reports} reports`} ·{' '}
                   {w.last_run ? (
                     <>
-                      <StatusPill status={w.last_run.status} /> {when(w.last_run.started_at)}
+                      <StatusPill status={w.last_run.status} />
+                      {w.last_run.seconds !== null && ` in ${took(w.last_run)}`} {when(w.last_run.started_at)}
                     </>
                   ) : (
                     'never run'
@@ -326,8 +351,8 @@ function Editor({ id }: { id: string | null }) {
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [shownRun, setShownRun] = useState<string | null>(null)
-  // Below the canvas: a run's results, or its load. Never both on one page.
-  const [view, setView] = useState<'results' | 'load'>('results')
+  // Below the canvas: a run's results, or its performance (time and resources). Never both on one page.
+  const [view, setView] = useState<'results' | 'performance'>('results')
   const [options, setOptions] = useState<Record<string, SourceOption[]>>({})
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -678,19 +703,19 @@ function Editor({ id }: { id: string | null }) {
         </aside>
       </div>
 
-      <section className={view === 'load' || below?.kind === 'report' ? 'panel wf-panel-report' : 'panel'}>
+      <section className={view === 'performance' || below?.kind === 'report' ? 'panel wf-panel-report' : 'panel'}>
         <div className="wf-report-header">
           <div className="wf-view-switch" role="tablist" aria-label="What to show">
             <button role="tab" aria-selected={view === 'results'} className={view === 'results' ? 'active' : ''} onClick={() => setView('results')}>
               Results
             </button>
-            <button role="tab" aria-selected={view === 'load'} className={view === 'load' ? 'active' : ''} onClick={() => setView('load')}>
-              Load
+            <button role="tab" aria-selected={view === 'performance'} className={view === 'performance' ? 'active' : ''} onClick={() => setView('performance')}>
+              Performance
             </button>
           </div>
           <h2>
-            {view === 'load'
-              ? 'Load of this run'
+            {view === 'performance'
+              ? 'Performance of this run'
               : below ? `${below.kind === 'report' ? 'Report' : 'Batch'}: ${belowTitle}` : 'Results'}
           </h2>
           {detail && detail.runs.length > 0 && (
@@ -699,17 +724,18 @@ function Editor({ id }: { id: string | null }) {
               <select value={run?.id ?? ''} onChange={(e) => setShownRun(e.target.value)}>
                 {detail.runs.map((r) => (
                   <option key={r.id} value={r.id}>
-                    {when(r.started_at)} · {STATUS_TEXT[r.status]}
+                    {when(r.started_at)} · {STATUS_TEXT[r.status]}{r.seconds !== null ? ` · ${took(r)}` : ''}
                   </option>
                 ))}
               </select>
             </label>
           )}
         </div>
+        {run && <RunSummary run={run} />}
         {!run ? (
-          <p className="muted">Not run yet. Run the workflow to see its {view === 'load' ? 'load' : 'results'} here.</p>
-        ) : view === 'load' ? (
-          id && <ArtifactView artifact={{ name: 'Load.html', kind: 'html', url: workflowLoadUrl(id, run.id) }} />
+          <p className="muted">Not run yet. Run the workflow to see its {view === 'performance' ? 'performance' : 'results'} here.</p>
+        ) : view === 'performance' ? (
+          id && <ArtifactView artifact={{ name: 'Performance.html', kind: 'html', url: workflowPerformanceUrl(id, run.id) }} />
         ) : below?.kind === 'report' ? (
           runReports[below.id] && id ? (
             <ArtifactView artifact={{ name: `${belowTitle}.html`, kind: 'html', url: workflowReportUrl(id, run.id, below.id) }} />

@@ -285,7 +285,7 @@ export function workflowReportUrl(id: string, runId: string, nodeId: string): st
   return `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/reports/${encodeURIComponent(nodeId)}`
 }
 
-/** One workflow run's load: every batch and analysis over time, as one HTML page. Not the results. */
-export function workflowLoadUrl(id: string, runId: string): string {
-  return `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/load`
+/** One workflow run's performance: time and resources of every batch and analysis, as one HTML page. Not the results. */
+export function workflowPerformanceUrl(id: string, runId: string): string {
+  return `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/performance`
 }
