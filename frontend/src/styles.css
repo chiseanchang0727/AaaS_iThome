@@ -592,3 +592,16 @@ pre.script { max-height: 480px; }
   background: var(--accent); color: var(--accent-text);
 }
 .wf-node.wf-first { border-color: var(--accent); border-width: 2px; }
+
+/* A workflow the agent built, in the chat. */
+.workflow-preview { margin: 12px 0 0; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+.workflow-preview figcaption {
+  display: flex; justify-content: space-between; align-items: center; gap: 12px; flex-wrap: wrap;
+  padding: 8px 12px; border-bottom: 1px solid var(--border);
+}
+.workflow-preview-title { font-weight: 600; }
+.workflow-preview-links { display: flex; gap: 14px; }
+.workflow-preview-links a { color: var(--accent); text-decoration: none; }
+.workflow-preview-canvas { height: 300px; }
+.workflow-preview .react-flow { --xy-background-color: var(--surface); }
+.workflow-preview .wf-run-summary, .workflow-preview > p { margin: 8px 12px; }

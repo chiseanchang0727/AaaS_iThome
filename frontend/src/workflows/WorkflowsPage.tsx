@@ -4,17 +4,13 @@ import {
   applyNodeChanges,
   Background,
   Controls,
-  Handle,
-  Position,
   ReactFlow,
   ReactFlowProvider,
   useReactFlow,
   type Connection,
   type Edge,
   type EdgeChange,
-  type Node,
   type NodeChange,
-  type NodeProps,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useCallback, useEffect, useMemo, useState, type DragEvent } from 'react'
@@ -38,27 +34,17 @@ import type {
   AnalysisSummary,
   SourceOption,
   Workflow,
-  WorkflowBody,
   WorkflowNodeRun,
   WorkflowRun,
   WorkflowSettings,
   WorkflowSummary,
 } from '../api/types'
 import { ArtifactView } from '../chat/ArtifactView'
+import { CONNECTS, NODE_TYPES, STATUS_TEXT, onTables, took, toBody, toFlow, withRun, type AnalysisData, type AnalysisFlowNode, type BatchData, type BatchFlowNode, type FlowNode, type ReportData, type ReportFlowNode } from './flow'
+import { RunSummary, StatusPill } from './nodes'
 
 const POLL_MS = 2000
 const DRAG_TYPE = 'application/x-saved-analysis'
-
-type Status = WorkflowNodeRun['status'] | WorkflowRun['status']
-
-const STATUS_TEXT: Record<Status, string> = {
-  waiting: 'waiting for a sandbox…',
-  running: 'running…',
-  done: 'done',
-  failed: 'failed',
-  needs_optimization: 'needs optimization',
-  partly_done: 'partly done',
-}
 
 function errorText(e: unknown): string {
   return e instanceof Error ? e.message : String(e)
@@ -70,148 +56,6 @@ function when(iso: string): string {
 
 function newId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 8)}`
-}
-
-function onTables(sources: Record<string, string>): string {
-  const swaps = Object.entries(sources).filter(([from, to]) => from !== to)
-  return swaps.length ? swaps.map(([from, to]) => `${from} → ${to}`).join(', ') : 'its saved tables'
-}
-
-/** How long a run took, e.g. "16 s"; empty while it runs. */
-function took(run: WorkflowRun): string {
-  return run.seconds === null ? '' : `${Math.round(run.seconds)} s`
-}
-
-/** How many sandboxes a run started: its analyses share a few; older runs had one each. */
-function sandboxesStarted(run: WorkflowRun): number {
-  return new Set(run.nodes.filter((n) => n.sandbox_at).map((n) => n.sandbox ?? n.node_id)).size
-}
-
-/** One line about a run: how long it took, how many analyses, how many sandboxes. */
-function RunSummary({ run }: { run: WorkflowRun }) {
-  const sandboxes = sandboxesStarted(run)
-  const analyses = run.nodes.length
-  return (
-    <p className="wf-run-summary" aria-label="Run summary">
-      {run.status === 'running' ? <b>Running…</b> : <b>Took {took(run)}</b>}
-      {` · ${analyses === 1 ? '1 analysis' : `${analyses} analyses`}`}
-      {sandboxes > 0 && ` · ${sandboxes === 1 ? '1 sandbox' : `${sandboxes} sandboxes`}`}
-      {run.status !== 'done' && run.status !== 'running' && ` · ${STATUS_TEXT[run.status]}`}
-    </p>
-  )
-}
-
-function StatusPill({ status }: { status: Status | undefined }) {
-  if (!status) return null
-  return <span className={`wf-status wf-status-${status}`}>{STATUS_TEXT[status]}</span>
-}
-
-/** The status of a batch: from the analyses connected to it, in one run. */
-function batchStatus(nodes: WorkflowNodeRun[]): Status | undefined {
-  if (nodes.length === 0) return undefined
-  if (nodes.some((n) => n.status === 'running' || n.status === 'waiting')) return 'running'
-  if (nodes.every((n) => n.status === 'done')) return 'done'
-  return nodes.some((n) => n.status === 'done') ? 'partly_done' : 'failed'
-}
-
-// --- the canvas's nodes -----------------------------------------------------------------
-
-type AnalysisData = {
-  analysisId: string
-  sources: Record<string, string>
-  /** Higher runs earlier ("run first"). */
-  priority: number
-  title: string
-  missing: boolean
-  status?: Status
-}
-type BatchData = { title: string; count: number; status?: Status }
-type ReportData = { title: string; count: number; status?: Status; url?: string }
-type AnalysisFlowNode = Node<AnalysisData, 'analysis'>
-type BatchFlowNode = Node<BatchData, 'batch'>
-type ReportFlowNode = Node<ReportData, 'report'>
-type FlowNode = AnalysisFlowNode | BatchFlowNode | ReportFlowNode
-
-/** The connections a workflow allows: source kind -> target kind. */
-const CONNECTS: Record<string, string> = { analysis: 'batch', batch: 'report' }
-
-function AnalysisNodeView({ data, selected }: NodeProps<AnalysisFlowNode>) {
-  return (
-    <div className={['wf-node', selected && 'selected', data.priority > 0 && 'wf-first'].filter(Boolean).join(' ')}>
-      <span className="wf-node-kind">
-        Analysis
-        {/* On the top line: the node keeps its height, so it never covers the one below. */}
-        {data.priority > 0 && <span className="wf-node-first">runs first</span>}
-      </span>
-      <span className="wf-node-title">{data.missing ? `${data.analysisId} (deleted)` : data.title}</span>
-      <span className="wf-node-meta">on {onTables(data.sources)}</span>
-      <StatusPill status={data.status} />
-      <Handle type="source" position={Position.Right} />
-    </div>
-  )
-}
-
-function BatchNodeView({ data, selected }: NodeProps<BatchFlowNode>) {
-  return (
-    <div className={selected ? 'wf-node wf-batch selected' : 'wf-node wf-batch'}>
-      <Handle type="target" position={Position.Left} />
-      <span className="wf-node-kind">Batch</span>
-      <span className="wf-node-title">{data.title}</span>
-      <span className="wf-node-meta">collects {data.count === 1 ? '1 analysis' : `${data.count} analyses`}</span>
-      <StatusPill status={data.status} />
-      <Handle type="source" position={Position.Right} />
-    </div>
-  )
-}
-
-function ReportNodeView({ data, selected }: NodeProps<ReportFlowNode>) {
-  return (
-    <div className={selected ? 'wf-node wf-report-node selected' : 'wf-node wf-report-node'}>
-      <Handle type="target" position={Position.Left} />
-      <span className="wf-node-kind">Report</span>
-      <span className="wf-node-title">{data.title}</span>
-      <span className="wf-node-meta">{data.count === 1 ? '1 batch' : `${data.count} batches`} on one page</span>
-      <StatusPill status={data.status} />
-      {data.url && (
-        <a className="wf-node-open nodrag" href={data.url} target="_blank" rel="noopener noreferrer">
-          Open report ↗
-        </a>
-      )}
-    </div>
-  )
-}
-
-const NODE_TYPES = { analysis: AnalysisNodeView, batch: BatchNodeView, report: ReportNodeView }
-
-function toFlow(workflow: Workflow): { nodes: FlowNode[]; edges: Edge[] } {
-  const nodes: FlowNode[] = workflow.nodes.map((n) =>
-    n.kind === 'analysis'
-      ? {
-          id: n.id, type: 'analysis', position: n.position,
-          data: {
-            analysisId: n.analysis_id, sources: n.sources, priority: n.priority ?? 0,
-            title: workflow.analyses[n.analysis_id]?.title ?? n.analysis_id,
-            missing: workflow.analyses[n.analysis_id] === null,
-          },
-        }
-      : { id: n.id, type: n.kind, position: n.position, data: { title: n.title, count: 0 } },
-  ) as FlowNode[]
-  const edges = workflow.edges.map((e) => ({ id: `${e.source}->${e.target}`, source: e.source, target: e.target }))
-  return { nodes, edges }
-}
-
-function toBody(title: string, nodes: FlowNode[], edges: Edge[], settings: WorkflowSettings): WorkflowBody {
-  return {
-    title,
-    settings,
-    nodes: nodes.map((n) => {
-      const position = { x: Math.round(n.position.x), y: Math.round(n.position.y) }
-      return n.type === 'analysis'
-        ? { kind: 'analysis', id: n.id, analysis_id: n.data.analysisId, sources: n.data.sources, priority: n.data.priority, position }
-        : { kind: n.type, id: n.id, title: n.data.title, position }
-    }),
-    edges: edges.map((e) => ({ source: e.source, target: e.target })),
-  }
 }
 
 // --- the list -------------------------------------------------------------------------------
@@ -398,29 +242,9 @@ function Editor({ id }: { id: string | null }) {
 
   const run = detail?.runs.find((r) => r.id === shownRun) ?? detail?.runs[0] ?? null
   const selectedNode = nodes.find((n) => n.id === selected) ?? null
-  // Picking a batch or report node asks for its results.
-  const selectedKind = selectedNode?.type
-  useEffect(() => {
-    if (selectedKind === 'batch' || selectedKind === 'report') setView('results')
-  }, [selected, selectedKind])
 
   // What the canvas shows: each node with how many it collects, and its status in the run shown.
-  const shown = useMemo<FlowNode[]>(
-    () =>
-      nodes.map((n) => {
-        if (n.type === 'analysis') {
-          return { ...n, data: { ...n.data, status: run?.nodes.find((r) => r.node_id === n.id)?.status } }
-        }
-        const count = edges.filter((e) => e.target === n.id).length
-        const inBatches = (batchIds: string[]) =>
-          batchIds.flatMap((b) => run?.batches[b] ?? []).flatMap((nodeId) => run?.nodes.filter((r) => r.node_id === nodeId) ?? [])
-        if (n.type === 'batch') return { ...n, data: { ...n.data, count, status: batchStatus(inBatches([n.id])) } }
-        const inRun = run?.reports?.[n.id]
-        const url = run && inRun && id ? workflowReportUrl(id, run.id, n.id) : undefined
-        return { ...n, data: { ...n.data, count, status: batchStatus(inBatches(inRun ?? [])), url } }
-      }),
-    [nodes, edges, run, id],
-  )
+  const shown = useMemo<FlowNode[]>(() => withRun(nodes, edges, run, id), [nodes, edges, run, id])
 
   const onNodesChange = useCallback((changes: NodeChange<FlowNode>[]) => {
     if (changes.some((c) => c.type === 'position' || c.type === 'remove' || c.type === 'add' || c.type === 'replace')) {
@@ -619,6 +443,10 @@ function Editor({ id }: { id: string | null }) {
             onEdgesChange={onEdgesChange}
             onConnect={onConnect}
             isValidConnection={isValidConnection}
+            onSelectionChange={({ nodes: picked }) => {
+              // Picking a batch or report node asks for its results.
+              if (picked.some((n) => n.type === 'batch' || n.type === 'report')) setView('results')
+            }}
             defaultEdgeOptions={{ animated: running }}
             colorMode="system"
             fitView

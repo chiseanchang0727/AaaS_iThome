@@ -39,7 +39,9 @@ node's page (workflows/report.py) is built from them when it is asked for.
 """
 
 import asyncio
+import dataclasses
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -72,8 +74,27 @@ def _seconds(start: str, end: str) -> float:
             datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()
 
 
-def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: AnalysesApi, *,
-                     query_rows: QueryRows, sandbox_limit: int | None = None, lanes: int | None = None) -> APIRouter:
+@dataclasses.dataclass
+class WorkflowsApi:
+    """The workflow routes as functions, for the agent's tools (agent/workflows.py): the same checks, the same
+    scheduler. They raise HTTPException as the routes do."""
+
+    router: APIRouter
+    list: Callable[[], Awaitable[list[dict]]]
+    get: Callable[[str], Awaitable[dict]]
+    create: Callable[["WorkflowBody"], Awaitable[dict]]
+    replace: Callable[[str, "WorkflowBody"], Awaitable[dict]]
+    start: Callable[[str], Awaitable[dict]]
+    wait: Callable[[str, str, float], Awaitable[dict]]
+    """(workflow id, run id, timeout in seconds) -> the run, once it ended or the time is up."""
+
+
+def workflows_router(*args, **kwargs) -> APIRouter:
+    return workflows_api(*args, **kwargs).router
+
+
+def workflows_api(store: WorkflowStore, analyses: AnalysisStore, api: AnalysesApi, *,
+                     query_rows: QueryRows, sandbox_limit: int | None = None, lanes: int | None = None) -> WorkflowsApi:
     """`api`: starts analysis runs as the Run button does; `query_rows`: to check each node's table swaps;
     `sandbox_limit`: how many sandboxes an account may hold at once; `lanes`: how many of them a workflow run
     uses (default: all but one, for chat; a workflow may set fewer)."""
@@ -336,4 +357,14 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
         # Only our own markup and numbers, but sandboxed like the report next to it.
         return HTMLResponse(render_load(refresh(run)), headers=ARTIFACT_HEADERS)
 
-    return router
+    async def wait(workflow_id: str, run_id: str, timeout: float) -> dict:
+        task = running.get(workflow_id)
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout)
+            except TimeoutError:
+                pass  # still going: the run as it is now
+        return await get_run(workflow_id, run_id)
+
+    return WorkflowsApi(router=router, list=list_workflows, get=get_workflow, create=create, replace=replace,
+                        start=start_run, wait=wait)

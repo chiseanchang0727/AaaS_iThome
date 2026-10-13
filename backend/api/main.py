@@ -9,6 +9,7 @@ from pathlib import Path
 from config import cfg
 from datasources import close_database, count_query, estimate_query, query_database
 from agent import export_rows
+from agent.workflows import connect as connect_workflow_tools
 from agent.save_analysis import dataset_reader
 from analyses import AnalysisStore
 from analyses.budget import Limits
@@ -25,7 +26,7 @@ from .history import HistoryStore
 from .load import load_router
 from .vendor import vendor_router
 from .wiring import make_context_filter, make_manager, store
-from .workflows import workflows_router
+from .workflows import workflows_api
 
 # role and server mark this run's sandboxes, so the next run can delete
 # any it leaves behind (see ConversationManager.clean_up_leftovers).
@@ -44,6 +45,16 @@ analyses = analyses_api(
     work_dir=cfg.sandbox.data_dir.parent, account=cfg.server.default_account,
     estimate=estimate_query, count=count_query, limits=Limits.from_config(cfg),
 )
+
+workflows = workflows_api(
+    WorkflowStore(cfg.server.workflows_dir), saved_analyses, analyses,
+    query_rows=lambda sql: query_database(sql, raw=True),
+    sandbox_limit=cfg.server.max_sandboxes_per_account,
+    # One sandbox stays free for chat while a workflow runs.
+    lanes=max(1, cfg.server.max_sandboxes_per_account - 1),
+)
+# The agent's save_workflow and run_workflow use the same routes (agents are built later, per conversation).
+connect_workflow_tools(workflows)
 
 app = create_app(
     manager,
@@ -68,11 +79,7 @@ app = create_app(
         load_router(history),
         analyses.router,
         vendor_router(cfg.server.artifacts_dir.parent / "vendor"),
-        workflows_router(WorkflowStore(cfg.server.workflows_dir), saved_analyses, analyses,
-                         query_rows=lambda sql: query_database(sql, raw=True),
-                         sandbox_limit=cfg.server.max_sandboxes_per_account,
-                         # One sandbox stays free for chat while a workflow runs.
-                         lanes=max(1, cfg.server.max_sandboxes_per_account - 1)),
+        workflows.router,
     ],
     history=history,
     default_account=cfg.server.default_account,
