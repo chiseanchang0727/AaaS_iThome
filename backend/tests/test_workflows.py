@@ -401,3 +401,26 @@ def test_a_workflows_own_sandboxes_and_run_first_steer_its_runs(tmp_path):
     assert [n["node_id"] for n in sorted(run["nodes"], key=lambda n: n["sandbox_at"])] == ["c", "a", "b"]
     too_many = {**workflow, "settings": {"lanes": 9}}
     assert run_workflow(app, too_many)["lanes"] == 3  # an account may hold no more
+
+
+def test_cleaning_one_lane_leaves_another_lanes_work_alone(tmp_path):
+    """On one machine (as in tests) lanes share a disk: a lane cleans only its own folder."""
+    import subprocess
+
+    from analyses.runner import clean_first
+    from api.analyses import lane_folder
+
+    work = PurePosixPath(tmp_path)
+    mine, theirs = lane_folder(work, "lane-a"), lane_folder(work, "lane-b")
+    for folder in (mine, theirs):
+        (tmp_path / ".analysis-run" / folder.name / "r1").mkdir(parents=True)
+        (tmp_path / ".analysis-run" / folder.name / "r1" / "data.txt").write_text("x")
+    busy = subprocess.Popen(["sleep", "30"], cwd=tmp_path / ".analysis-run" / "lane-b" / "r1")
+    try:
+        done = subprocess.run(["bash", "-c", clean_first(mine) + "echo cleaned"], capture_output=True, text=True)
+        assert done.stdout.strip() == "cleaned"
+        assert not (tmp_path / ".analysis-run" / "lane-a").exists()
+        assert (tmp_path / ".analysis-run" / "lane-b" / "r1" / "data.txt").exists()
+        assert busy.poll() is None  # the other lane's script still runs
+    finally:
+        busy.kill()

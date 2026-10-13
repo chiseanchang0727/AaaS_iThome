@@ -58,7 +58,12 @@ from .vendor import local_plotly
 log = logging.getLogger(__name__)
 
 RUN_FOLDER = ".analysis-run"
-"""Where runs keep their scratch folders (one per run), inside the sandbox's work folder."""
+"""Runs work under <work>/.analysis-run/<sandbox>/<run id>: a lane's runs share its <sandbox> folder, so
+cleaning up between them touches only that lane's (on one machine, as in tests, lanes share a disk)."""
+
+
+def lane_folder(work_dir: PurePosixPath, sandbox: str) -> PurePosixPath:
+    return work_dir / RUN_FOLDER / sandbox
 
 AskAgent = Callable[[str, str, HistoryStore], Awaitable[str]]
 """(conversation id, message, where to log it) -> the agent's final answer."""
@@ -159,7 +164,8 @@ def analyses_api(
     async def run_once(sandbox, analysis: Analysis, record: RunRecord, estimates: list[InputMeasure],
                        fetched: Fetched, prepare: str = "") -> RunResult:
         # The folder is left: the sandbox is closed right after, or cleaned before its next run.
-        return await run(sandbox, analysis, query=query, read_dataset=read_dataset, scratch=work_dir / RUN_FOLDER / record.id,
+        scratch = lane_folder(work_dir, record.sandbox or f"analysis-{record.id}") / record.id
+        return await run(sandbox, analysis, query=query, read_dataset=read_dataset, scratch=scratch,
                          sources=record.sources, limits=limits, estimates=estimates, fetched=fetched,
                          prepare=prepare, clean_up=False)
 
@@ -230,7 +236,7 @@ def analyses_api(
             # Ready, but the data may still be coming from the database: that wait counts as moving data.
             fetched = await fetching
             # A reused sandbox is cleaned in the same call that makes this run's folder.
-            prepare = clean_first(work_dir / RUN_FOLDER) if reused else ""
+            prepare = clean_first(lane_folder(work_dir, conversation_id)) if reused else ""
             result = await run_once(conversation.sandbox, analysis, record, estimates, fetched, prepare)
             if reused and not result.ok and (result.error or "").startswith("could not make the scratch folder"):
                 await retire(lane)  # it would not clean up: a new sandbox, once
