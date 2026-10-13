@@ -17,9 +17,11 @@ run of that analysis (trigger "workflow", on the node's tables). How:
     1. The size check of every node first (database only): a node it stops is
        recorded as "needs_optimization" at once and never waits for a sandbox.
        The lanes' sandboxes start meanwhile.
-    2. The rest queue, longest first, by their analysis's past runs on the same
-       tables (one never run counts as longest: it goes first).
-    3. `lanes` sandboxes (fewer than an account may hold, so chat keeps one)
+    2. The rest queue by priority (a node's "run first"), then longest first,
+       by their analysis's past runs on the same tables (one never run counts
+       as longest: it goes first).
+    3. `lanes` sandboxes (the workflow's own setting, or all but one an account
+       may hold, so chat keeps one; never more than an account may hold)
        take the queue: each runs analyses one after another, cleaning up in
        between (api/analyses.py, Lane), and is given back when the queue is
        empty. Renting a sandbox takes 10-15 seconds and a script about one:
@@ -37,7 +39,9 @@ node's page (workflows/report.py) is built from them when it is asked for.
 """
 
 import asyncio
+import dataclasses
 import logging
+from collections.abc import Awaitable, Callable
 from datetime import datetime
 
 from fastapi import APIRouter, HTTPException
@@ -49,7 +53,7 @@ from analyses.models import now, now_ms
 from analyses.sources import QueryRows, check_mapping
 from analyses.store import new_id, new_run_id
 from workflows import Workflow, WorkflowRun, WorkflowStore
-from workflows.models import Edge, Node, NodeRun
+from workflows.models import Edge, Node, NodeRun, WorkflowSettings
 from workflows.report import render, render_load
 
 from .analyses import AnalysesApi, Lane
@@ -62,6 +66,7 @@ class WorkflowBody(BaseModel):
     title: str
     nodes: list[Node] = []
     edges: list[Edge] = []
+    settings: WorkflowSettings = WorkflowSettings()
 
 
 def _seconds(start: str, end: str) -> float:
@@ -69,12 +74,36 @@ def _seconds(start: str, end: str) -> float:
             datetime.fromisoformat(start.replace("Z", "+00:00"))).total_seconds()
 
 
-def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: AnalysesApi, *,
-                     query_rows: QueryRows, sandbox_limit: int | None = None, lanes: int | None = None) -> APIRouter:
+@dataclasses.dataclass
+class WorkflowsApi:
+    """The workflow routes as functions, for the agent's tools (agent/workflows.py): the same checks, the same
+    scheduler. They raise HTTPException as the routes do."""
+
+    router: APIRouter
+    list: Callable[[], Awaitable[list[dict]]]
+    get: Callable[[str], Awaitable[dict]]
+    create: Callable[["WorkflowBody"], Awaitable[dict]]
+    replace: Callable[[str, "WorkflowBody"], Awaitable[dict]]
+    start: Callable[[str], Awaitable[dict]]
+    wait: Callable[[str, str, float], Awaitable[dict]]
+    """(workflow id, run id, timeout in seconds) -> the run, once it ended or the time is up."""
+
+
+def workflows_router(*args, **kwargs) -> APIRouter:
+    return workflows_api(*args, **kwargs).router
+
+
+def workflows_api(store: WorkflowStore, analyses: AnalysisStore, api: AnalysesApi, *,
+                     query_rows: QueryRows, sandbox_limit: int | None = None, lanes: int | None = None) -> WorkflowsApi:
     """`api`: starts analysis runs as the Run button does; `query_rows`: to check each node's table swaps;
     `sandbox_limit`: how many sandboxes an account may hold at once; `lanes`: how many of them a workflow run
-    uses (default: all but one, for chat)."""
-    lanes = lanes or max(1, (sandbox_limit or 2) - 1)
+    uses (default: all but one, for chat; a workflow may set fewer)."""
+    default_lanes = lanes or max(1, (sandbox_limit or 2) - 1)
+
+    def lanes_for(workflow: Workflow) -> int:
+        """Its own setting, or the default; at least one, and never more than an account may hold."""
+        wanted = workflow.settings.lanes or default_lanes
+        return max(1, min(wanted, sandbox_limit) if sandbox_limit else wanted)
     router = APIRouter(prefix="/api/workflows")
     running: dict[str, asyncio.Task] = {}
     """workflow id -> its run in progress."""
@@ -130,9 +159,10 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
                 return record.seconds
         return float("inf")
 
-    async def schedule(run: WorkflowRun, jobs: list) -> None:
+    async def schedule(run: WorkflowRun, jobs: list, priorities: dict[str, int]) -> None:
         """Check every job's size, start the stopped ones (they need no sandbox), run the rest in lanes."""
         # Start the sandboxes while the sizes are checked: the check is database work, a start takes 10-15 s.
+        lanes = run.lanes or 1
         opened = [Lane(name=f"workflow-{run.id}-{k + 1}") for k in range(min(lanes, len(jobs)))]
         for lane in opened:
             await api.open_lane(lane)
@@ -164,8 +194,9 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
             return task
 
         tasks = [launch(*job) for job in stopped]
-        # Longest first: short ones fill the gaps at the end. The sort keeps node order among equals.
-        queue.sort(key=lambda job: -expected_seconds(job[1].id, job[2]))
+        # "Run first" before the rest; then longest first: short ones fill the gaps at the end.
+        # The sort keeps node order among equals.
+        queue.sort(key=lambda job: (-priorities.get(job[0].node_id, 0), -expected_seconds(job[1].id, job[2])))
 
         async def work(lane: Lane) -> None:
             try:
@@ -231,7 +262,8 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
 
     @router.post("", status_code=201)
     async def create(body: WorkflowBody):
-        workflow = Workflow(id=new_id(), title=body.title.strip(), nodes=body.nodes, edges=body.edges)
+        workflow = Workflow(id=new_id(), title=body.title.strip(), nodes=body.nodes, edges=body.edges,
+                            settings=body.settings)
         found = await problems(workflow)
         if found:
             raise HTTPException(400, "; ".join(found))
@@ -247,7 +279,7 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
         old = get(workflow_id)
         if workflow_id in running:
             raise HTTPException(409, "this workflow is running; change it when the run ends")
-        workflow = Workflow(id=old.id, title=body.title.strip(), nodes=body.nodes, edges=body.edges,
+        workflow = Workflow(id=old.id, title=body.title.strip(), nodes=body.nodes, edges=body.edges, settings=body.settings,
                             created_at=old.created_at, updated_at=now())
         found = await problems(workflow)
         if found:
@@ -281,7 +313,7 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
 
         run = WorkflowRun(id=new_run_id(), workflow_id=workflow.id, started_at=now(), batches=workflow.batches(),
                           reports=workflow.reports(), workflow_title=workflow.title, sandbox_limit=sandbox_limit,
-                          lanes=lanes, titles={n.id: n.title for n in workflow.nodes if n.kind != "analysis"})
+                          lanes=lanes_for(workflow), titles={n.id: n.title for n in workflow.nodes if n.kind != "analysis"})
         jobs = []
         for node, analysis in targets:
             swaps = {old: new for old, new in node.sources.items() if old != new}
@@ -290,7 +322,8 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
             run.nodes.append(entry)
             jobs.append((entry, analysis, swaps))
         store.save_run(run)
-        running[workflow_id] = asyncio.create_task(finish(run, [asyncio.create_task(schedule(run, jobs))]))
+        priorities = {n.id: n.priority for n in workflow.nodes if n.kind == "analysis"}
+        running[workflow_id] = asyncio.create_task(finish(run, [asyncio.create_task(schedule(run, jobs, priorities))]))
         return run.model_dump()
 
     @router.get("/{workflow_id}/runs/{run_id}")
@@ -324,4 +357,14 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
         # Only our own markup and numbers, but sandboxed like the report next to it.
         return HTMLResponse(render_load(refresh(run)), headers=ARTIFACT_HEADERS)
 
-    return router
+    async def wait(workflow_id: str, run_id: str, timeout: float) -> dict:
+        task = running.get(workflow_id)
+        if task is not None:
+            try:
+                await asyncio.wait_for(asyncio.shield(task), timeout)
+            except TimeoutError:
+                pass  # still going: the run as it is now
+        return await get_run(workflow_id, run_id)
+
+    return WorkflowsApi(router=router, list=list_workflows, get=get_workflow, create=create, replace=replace,
+                        start=start_run, wait=wait)

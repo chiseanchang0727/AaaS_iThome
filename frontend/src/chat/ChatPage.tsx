@@ -6,6 +6,7 @@ import { ArtifactView } from './ArtifactView'
 import { SandboxStatus } from './SandboxStatus'
 import type { Message } from './state'
 import { SavedAnalysisLinks } from './SavedAnalysisLinks'
+import { WorkflowPreviews } from './WorkflowPreview'
 import { Steps } from './Steps'
 import { useChat } from './useChat'
 
@@ -37,6 +38,7 @@ function MessageView({ message }: { message: Message }) {
         <ArtifactView key={a.url} artifact={a} />
       ))}
       <SavedAnalysisLinks steps={message.steps} />
+      <WorkflowPreviews steps={message.steps} />
       {streaming && !message.text && message.steps.length === 0 && <p className="muted">Starting…</p>}
       {message.status === 'error' && <p className="error">⚠ {message.error}</p>}
     </div>

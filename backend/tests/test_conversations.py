@@ -861,3 +861,74 @@ def test_ready_says_whether_the_sandbox_was_warm_or_new():
         assert heard["first"][0][1]["memory_gb"] == 1
 
     run(scenario())
+
+
+# --- runs: saved analyses and workflow lanes --------------------------------------------------
+
+
+def test_a_run_takes_back_its_accounts_longest_idle_chat_when_full():
+    """Open chats keep their sandboxes for a while; a workflow of the same account takes the idlest back."""
+    async def scenario():
+        clock = Clock()
+        m = manager(GatedProvider(open=True), clock=clock, max_per_account=2, wait_seconds=0.05,
+                    run_wait_seconds=0.5, reclaim_idle_seconds=60)
+        older = await started_for(m, "chat-old", "alice")
+        clock.now = 30
+        newer = await started_for(m, "chat-new", "alice")
+        clock.now = 120  # both idle: the old one 120 s, the new one 90 s
+        run = await m.get_or_create("lane-1", "alice", kind="run")
+        await asyncio.wait_for(asyncio.shield(run.starting), 2)
+        assert run.sandbox is not None
+        assert m.get("chat-old") is None and m.get("chat-new") is newer  # the idlest gave way
+        assert older.sandbox is None  # closed; the chat keeps its history and gets a new sandbox next time
+
+    run(scenario())
+
+
+def test_a_run_never_takes_a_chat_that_is_answering_or_just_used():
+    async def scenario():
+        clock = Clock()
+        m = manager(GatedProvider(open=True), clock=clock, max_per_account=2, wait_seconds=0.05,
+                    run_wait_seconds=0.2, reclaim_idle_seconds=60)
+        answering = await started_for(m, "chat-busy", "alice")
+        clock.now = 100
+        recent = await started_for(m, "chat-recent", "alice")  # used just now
+        async with answering.lock:  # a turn is going on
+            run = await m.get_or_create("lane-1", "alice", kind="run")
+            await asyncio.wait_for(asyncio.shield(run.starting), 2)
+        assert run.sandbox is None and m.get("chat-busy") and m.get("chat-recent")
+
+    run(scenario())
+
+
+def test_a_run_waits_longer_than_a_chat_and_gets_the_next_free_sandbox():
+    async def scenario():
+        m = manager(GatedProvider(open=True), max_per_account=1, wait_seconds=0.05, run_wait_seconds=2)
+        holder = await m.get_or_create("lane-1", "alice", kind="run")
+        await holder.starting
+        waiting = await m.get_or_create("lane-2", "alice", kind="run")
+        await asyncio.sleep(0.2)  # longer than a chat would wait
+        await m.close("lane-1")
+        await asyncio.wait_for(asyncio.shield(waiting.starting), 2)
+        assert waiting.sandbox is not None
+
+    run(scenario())
+
+
+def test_a_runs_sandbox_is_neither_reaped_nor_taken_by_another_account():
+    async def scenario():
+        clock = Clock()
+        m = manager(GatedProvider(open=True), clock=clock, max_sandboxes=2, wait_seconds=0.05)
+        a = await m.get_or_create("lane-1", "alice", kind="run")
+        await a.starting
+        b = await m.get_or_create("lane-2", "alice", kind="run")
+        await b.starting
+        bob = await m.get_or_create("chat-1", "bob")  # all slots taken: may not take alice's runs
+        await asyncio.wait_for(asyncio.shield(bob.starting), 2)
+        assert bob.sandbox is None and m.get("lane-1") and m.get("lane-2")
+        clock.now = 10_000
+        reaped = await m.reap_idle()
+        assert "lane-1" not in reaped and "lane-2" not in reaped  # a run is not an idle chat
+        assert m.get("lane-1") is a and m.get("lane-2") is b
+
+    run(scenario())

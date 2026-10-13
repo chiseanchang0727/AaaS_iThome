@@ -8,6 +8,7 @@ import type { PastConversation } from '../api/types'
 import { turnSteps } from '../evals/results'
 import { ArtifactView } from './ArtifactView'
 import { SavedAnalysisLinks } from './SavedAnalysisLinks'
+import { WorkflowPreviews } from './WorkflowPreview'
 import { Steps } from './Steps'
 
 function errorText(e: unknown): string {
@@ -57,6 +58,7 @@ function Conversation({ id }: { id: string }) {
                   </div>
                 )}
                 <SavedAnalysisLinks steps={steps} />
+                <WorkflowPreviews steps={steps} past />
               </div>
             </div>
           )

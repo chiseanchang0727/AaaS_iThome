@@ -378,3 +378,49 @@ def test_the_next_analyses_data_is_fetched_while_one_runs(tmp_path, monkeypatch)
     first, second, third = sorted(run["nodes"], key=lambda n: n["sandbox_at"])
     assert len(asked) == 3  # each analysis's data fetched once
     assert sorted(asked)[2] < second["finished_at"]  # the third's data was there before the second ended
+
+
+def test_a_workflow_keeps_its_settings_and_priorities_when_saved(tmp_path):
+    app, _ = build(tmp_path)
+    with TestClient(app) as client:
+        workflow = lanes_body(("a", "sessions1", {}), ("b", "sessions1", {}))
+        workflow["settings"], workflow["nodes"][1]["priority"] = {"lanes": 1}, 2
+        saved = client.post("/api/workflows", json=workflow).json()
+        assert saved["settings"] == {"lanes": 1} and saved["nodes"][1]["priority"] == 2
+        refused = client.put(f"/api/workflows/{saved['id']}", json={**workflow, "settings": {"lanes": 0}})
+    assert refused.status_code == 400 and "at least one sandbox" in refused.json()["detail"]
+
+
+def test_a_workflows_own_sandboxes_and_run_first_steer_its_runs(tmp_path):
+    """Its lanes setting caps the sandboxes (never above the account's); run first goes ahead of the queue."""
+    app, _ = build(tmp_path, sandbox_limit=3, lanes=2)
+    workflow = lanes_body(("a", "sessions1", {}), ("b", "sessions1", {}), ("c", "sessions1", {}))
+    workflow["settings"], workflow["nodes"][2]["priority"] = {"lanes": 1}, 1
+    run = run_workflow(app, workflow)
+    assert run["lanes"] == 1 and len({n["sandbox"] for n in run["nodes"]}) == 1
+    assert [n["node_id"] for n in sorted(run["nodes"], key=lambda n: n["sandbox_at"])] == ["c", "a", "b"]
+    too_many = {**workflow, "settings": {"lanes": 9}}
+    assert run_workflow(app, too_many)["lanes"] == 3  # an account may hold no more
+
+
+def test_cleaning_one_lane_leaves_another_lanes_work_alone(tmp_path):
+    """On one machine (as in tests) lanes share a disk: a lane cleans only its own folder."""
+    import subprocess
+
+    from analyses.runner import clean_first
+    from api.analyses import lane_folder
+
+    work = PurePosixPath(tmp_path)
+    mine, theirs = lane_folder(work, "lane-a"), lane_folder(work, "lane-b")
+    for folder in (mine, theirs):
+        (tmp_path / ".analysis-run" / folder.name / "r1").mkdir(parents=True)
+        (tmp_path / ".analysis-run" / folder.name / "r1" / "data.txt").write_text("x")
+    busy = subprocess.Popen(["sleep", "30"], cwd=tmp_path / ".analysis-run" / "lane-b" / "r1")
+    try:
+        done = subprocess.run(["bash", "-c", clean_first(mine) + "echo cleaned"], capture_output=True, text=True)
+        assert done.stdout.strip() == "cleaned"
+        assert not (tmp_path / ".analysis-run" / "lane-a").exists()
+        assert (tmp_path / ".analysis-run" / "lane-b" / "r1" / "data.txt").exists()
+        assert busy.poll() is None  # the other lane's script still runs
+    finally:
+        busy.kill()

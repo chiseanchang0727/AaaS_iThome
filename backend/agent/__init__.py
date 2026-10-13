@@ -27,6 +27,7 @@ from .middleware import SkillEnforcerMiddleware
 from .save_analysis import dataset_reader, make_analysis_readers, make_save_analysis
 from .skill_router import SkillRouterMiddleware, build_classifier
 from .tools import make_export_query, make_list_datasets, make_request_bigger_sandbox, query_database, to_parquet
+from . import workflows
 
 __all__ = ["build_agent", "SYSTEM_PROMPT", "SANDBOX_PROMPT"]
 
@@ -154,6 +155,9 @@ def build_agent(
             query=export_rows, read_dataset=dataset_reader(registry, cfg.server.uploads_dir / "files"),
             work_dir=cfg.sandbox.data_dir.parent, estimate=estimate_query, limits=Limits.from_config(cfg), count=count_query,
         ))
+    if workflows.connected():  # the app's workflow routes; not in evals or scripts
+        tools += workflows.make_workflow_tools()
+        system_prompt += workflows.PROMPT
 
     middleware = []
     if router := skill_router():

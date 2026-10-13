@@ -635,6 +635,8 @@ export interface WorkflowAnalysisNode {
   id: string
   analysis_id: string
   sources: Record<string, string>
+  /** Higher runs earlier; among equals, the longest first. */
+  priority?: number
   position: NodePosition
 }
 
@@ -663,10 +665,16 @@ export interface WorkflowEdge {
 }
 
 /** What PUT/POST /api/workflows take. */
+export interface WorkflowSettings {
+  /** Sandboxes a run of it uses at most; null: the default (all but one per account). */
+  lanes: number | null
+}
+
 export interface WorkflowBody {
   title: string
   nodes: WorkflowNode[]
   edges: WorkflowEdge[]
+  settings?: WorkflowSettings
 }
 
 export interface WorkflowNodeRun {

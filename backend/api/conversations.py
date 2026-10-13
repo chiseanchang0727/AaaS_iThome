@@ -96,6 +96,9 @@ class Conversation:
     """Memory of its sandbox: the provider's default, or more after an upgrade."""
     on_event: Callable[[str, dict[str, Any]], None] | None = None
     """Hears what happens to its sandbox (ready, moved, ...). Set per turn by the API."""
+    kind: str = "chat"
+    """"chat": a user's conversation; "run": a saved analysis's run or a workflow's lane, whose sandbox runs code
+    and is never taken by anyone else. A run may take back its own account's idle chat sandboxes."""
 
 
 class ConversationManager:
@@ -108,6 +111,8 @@ class ConversationManager:
         clock: Callable[[], float] = time.monotonic,
         max_sandboxes: int | None = None,
         wait_seconds: float = 30.0,
+        run_wait_seconds: float = 300.0,
+        reclaim_idle_seconds: float = 60.0,
         check_after_seconds: float = 60.0,
         warm_sandboxes: int = 0,
         max_per_account: int | None = None,
@@ -145,6 +150,10 @@ class ConversationManager:
         self._changed = asyncio.Event()
         """Set when a slot frees up or a warm sandbox is ready."""
         self._wait_seconds = wait_seconds
+        self._run_wait_seconds = run_wait_seconds
+        """How long a run waits for a sandbox: a workflow's queue would rather wait than fail."""
+        self._reclaim_idle_seconds = reclaim_idle_seconds
+        """How long a chat must have been idle before a run of its own account may take its sandbox."""
         self._check_after_seconds = check_after_seconds
         self._warm_target = warm_sandboxes if provider is not None else 0
         self._warm: list[tuple[SandboxBackendProtocol, float]] = []
@@ -247,10 +256,12 @@ class ConversationManager:
             logger.warning("deleted %d sandbox(es) an earlier run left behind: %s", len(deleted), deleted)
         return deleted
 
-    async def get_or_create(self, conversation_id: str, account: str = DEFAULT_ACCOUNT) -> Conversation:
+    async def get_or_create(self, conversation_id: str, account: str = DEFAULT_ACCOUNT, *,
+                            kind: str = "chat") -> Conversation:
         """The live conversation with this id, or a new one for `account`. Never waits for a sandbox.
 
-        A new conversation's sandbox starts in the background (`starting`).
+        A new conversation's sandbox starts in the background (`starting`). `kind`: "run" for a saved
+        analysis's run or a workflow's lane (see Conversation.kind).
         Raises NotYourConversation if the id is another account's.
         """
         conversation = self._conversations.get(conversation_id)
@@ -258,7 +269,7 @@ class ConversationManager:
             raise NotYourConversation(conversation_id)
         if conversation is None:
             conversation = Conversation(
-                conversation_id, None, None, self._clock(), account=account, memory_gb=self._default_gb
+                conversation_id, None, None, self._clock(), account=account, memory_gb=self._default_gb, kind=kind
             )
             self._conversations[conversation_id] = conversation
             self._launch(conversation, have_slot=False)
@@ -300,7 +311,7 @@ class ConversationManager:
                     self._free_slot(conversation.account)
                     raise
             else:
-                sandbox, how = await self._start_in_new_slot(conversation.account)
+                sandbox, how = await self._start_in_new_slot(conversation.account, run=conversation.kind == "run")
         except BaseException as e:
             logger.warning("no sandbox for conversation %s: %s", conversation.id, e)
             self._event(conversation, "sandbox_unavailable", reason=str(e), seconds=round(time.monotonic() - started, 2))
@@ -390,9 +401,9 @@ class ConversationManager:
         return Upgrade(bigger, f"Moved to a bigger sandbox ({memory_gb} GB memory, {cpu} vCPU) "
                                "with the files from the work folder.")
 
-    async def _start_in_new_slot(self, account: str) -> tuple[SandboxBackendProtocol, str]:
+    async def _start_in_new_slot(self, account: str, run: bool = False) -> tuple[SandboxBackendProtocol, str]:
         """A warm sandbox, or a new one in a freed slot, and which. SandboxesBusy if neither comes."""
-        warm = await self._obtain(account)
+        warm = await self._obtain(account, run=run)
         try:
             if warm is None:
                 return await self._start_sandbox(), "new"
@@ -464,8 +475,8 @@ class ConversationManager:
         now = self._clock()
         idle = [
             c.id for c in self._conversations.values()
-            if now - c.last_used > self._idle_seconds and not c.lock.locked()
-        ]
+            if now - c.last_used > self._idle_seconds and not c.lock.locked() and c.kind != "run"
+        ]  # a run closes its own sandbox when it ends; a long one is not idle
         for conversation_id in idle:
             await self.close(conversation_id)
         self._refill()  # also retries a pool that failed to fill earlier
@@ -516,7 +527,7 @@ class ConversationManager:
 
     # --- slots and the warm pool ------------------------------------------------
 
-    async def _obtain(self, account: str) -> SandboxBackendProtocol | None:
+    async def _obtain(self, account: str, run: bool = False) -> SandboxBackendProtocol | None:
         """A warm sandbox, or None after taking a slot to start one in, for `account`.
 
         An account with no sandbox is guaranteed one: when every slot is taken,
@@ -524,14 +535,23 @@ class ConversationManager:
         for it (that conversation keeps its memory and gets a new sandbox on
         its next message). An account at `max_per_account` waits for one of
         its own. Waits up to `wait_seconds`, then raises `SandboxesBusy`.
+
+        A `run` (a saved analysis's run, a workflow's lane) waits up to
+        `run_wait_seconds`, and when its account is full it takes back that
+        account's longest-idle chat sandbox (idle at least
+        `reclaim_idle_seconds`, not answering): a chat keeps its sandbox for
+        `idle_seconds` after its last message, and a few open chats would
+        otherwise leave a workflow none.
         """
         if self._provider is None:
             return None
-        deadline = asyncio.get_running_loop().time() + self._wait_seconds
+        deadline = asyncio.get_running_loop().time() + (self._run_wait_seconds if run else self._wait_seconds)
         self._waiting += 1
         try:
             while True:
                 if self._max_per_account is not None and self._held[account] >= self._max_per_account:
+                    if run and await self._reclaim_idle_chat(account):
+                        continue
                     reason = (f"this account already uses {self._held[account]} sandboxes, its limit; "
                               "finish or close a conversation first")
                 else:
@@ -543,6 +563,8 @@ class ConversationManager:
                         self._held[account] += 1
                         return None
                     if self._held[account] == 0 and await self._reclaim_for(account):
+                        continue
+                    if run and await self._reclaim_idle_chat(account):
                         continue
                     reason = self._full_reason()
                 remaining = deadline - asyncio.get_running_loop().time()
@@ -560,12 +582,33 @@ class ConversationManager:
         return (f"all {self._max_memory_gb} GB of sandbox memory is in use "
                 f"({self._memory_used} GB); try again in a minute")
 
+    async def _reclaim_idle_chat(self, account: str) -> bool:
+        """Close `account`'s longest-idle chat sandbox, for a run of the same account. True if closed.
+
+        Only a chat idle at least `reclaim_idle_seconds` and not answering: the chat keeps its history and
+        gets a new sandbox with its next message; what was only in that sandbox (exported data) is gone.
+        """
+        now = self._clock()
+        candidates = [
+            c for c in self._conversations.values()
+            if c.account == account and c.kind == "chat" and c.sandbox is not None and not c.lock.locked()
+            and now - c.last_used >= self._reclaim_idle_seconds
+        ]
+        if not candidates:
+            return False
+        victim = min(candidates, key=lambda c: c.last_used)
+        logger.info("closing %s's idle chat %s so a run gets a sandbox", account, victim.id)
+        self._event(victim, "sandbox_reclaimed", reason="a run of the same account needed a sandbox")
+        await self.close(victim.id)
+        return True
+
     async def _reclaim_for(self, account: str) -> bool:
-        """Close another account's longest-idle sandbox, if one holds two or more. True if closed."""
+        """Close another account's longest-idle sandbox, if one holds two or more. True if closed.
+        Never a run's: its sandbox is running code."""
         candidates = [
             c for c in self._conversations.values()
             if c.account != account and c.sandbox is not None and not c.lock.locked()
-            and self._held[c.account] >= 2
+            and c.kind != "run" and self._held[c.account] >= 2
         ]
         if not candidates:
             return False

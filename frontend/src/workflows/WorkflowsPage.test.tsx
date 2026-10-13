@@ -178,4 +178,19 @@ describe('WorkflowsPage', () => {
     await userEvent.click(screen.getByRole('tab', { name: 'Results' }))
     expect(screen.getByTitle('Sessions report.html')).toBeInTheDocument()
   })
+
+  it('keeps settings and run first when saving', async () => {
+    const calls = mockFetch((call) =>
+      call.method === 'PUT' ? jsonResponse({ ...WORKFLOW, ...(call.body as object) }) : backend()(call),
+    )
+    const { container } = renderAt('/workflows/wf1')
+    await screen.findByRole('textbox', { name: 'Workflow title' })
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Sandboxes per run' }), '1')
+    fireEvent.click(container.querySelector('.react-flow__node[data-id="big"]') as HTMLElement)
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Run first' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+    const body = calls.find((c) => c.method === 'PUT')?.body as { settings: unknown; nodes: { id: string; priority?: number }[] }
+    expect(body.settings).toEqual({ lanes: 1 })
+    expect(Object.fromEntries(body.nodes.filter((n) => n.priority !== undefined).map((n) => [n.id, n.priority]))).toEqual({ small: 0, big: 1 })
+  })
 })

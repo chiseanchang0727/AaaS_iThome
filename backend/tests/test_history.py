@@ -22,14 +22,19 @@ def test_a_turn_writes_one_line_per_message(tmp_path):
         thread_id = chat(client, "How many rows?")[0]["thread_id"]
 
     ts = "2026-09-30T10:00:00Z"
-    assert history.read(thread_id) == [
-        {"id": "id1", "previous": None, "turn": 1, "role": "user", "content": "How many rows?",
-         "account": "test_user", "ts": ts},
-        {"id": "id2", "previous": "id1", "turn": 1, "role": "assistant", "content": "Let me check.",
+    lines = history.read(thread_id)
+    # The sandbox starts in the background: when it is ready, a sandbox_event line joins the turn, before, between
+    # or after the messages, as timing has it. The messages and the chain are what this test is about.
+    assert [line["previous"] for line in lines] == [None, *(line["id"] for line in lines[:-1])]
+    messages = [{k: v for k, v in line.items() if k not in ("id", "previous")}
+                for line in lines if line["role"] != "sandbox_event"]
+    assert messages == [
+        {"turn": 1, "role": "user", "content": "How many rows?", "account": "test_user", "ts": ts},
+        {"turn": 1, "role": "assistant", "content": "Let me check.",
          "tool_calls": [{"id": "c1", "name": "query_database", "args": {"sql": "SELECT 1"}}], "ts": ts},
-        {"id": "id3", "previous": "id2", "turn": 1, "role": "tool", "tool_call_id": "c1", "name": "query_database",
+        {"turn": 1, "role": "tool", "tool_call_id": "c1", "name": "query_database",
          "content": '[{"n": 1}]', "error": False, "ts": ts},
-        {"id": "id4", "previous": "id3", "turn": 1, "role": "assistant", "content": "There is **1** row.", "ts": ts},
+        {"turn": 1, "role": "assistant", "content": "There is **1** row.", "ts": ts},
     ]
 
 
@@ -39,8 +44,8 @@ def test_the_file_is_plain_jsonl(tmp_path):
         thread_id = chat(client, "你好")[0]["thread_id"]
 
     lines = history.path(thread_id).read_text(encoding="utf-8").splitlines()
-    assert len(lines) == 4
     assert all(isinstance(json.loads(line), dict) for line in lines)
+    assert sum(1 for line in lines if json.loads(line)["role"] != "sandbox_event") == 4  # and maybe its sandbox's start
     assert "你好" in lines[0]  # readable as-is, not \\u-escaped
 
 
