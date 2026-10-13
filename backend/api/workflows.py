@@ -8,7 +8,8 @@
     POST   /api/workflows/{id}/runs                 run it, in the background (202)
     GET    /api/workflows/{id}/runs/{run_id}        one run: each node's status and outputs
     GET    /api/workflows/{id}/runs/{run_id}/reports/{node}   a report node's page for that run: the results (HTML)
-    GET    /api/workflows/{id}/runs/{run_id}/load                 that run's load: every batch and analysis over time (HTML)
+    GET    /api/workflows/{id}/runs/{run_id}/performance          that run's performance: time and resources of every
+                                                                   batch and analysis (HTML); /load is the old address
 
 A run starts every analysis node connected to a batch, each as an ordinary
 run of that analysis (trigger "workflow", on the node's tables). How:
@@ -313,7 +314,8 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
         # It embeds pages the agent's scripts wrote: served like them, as an untrusted sandboxed page.
         return HTMLResponse(render(refresh(run), node_id, read_output), headers=ARTIFACT_HEADERS)
 
-    @router.get("/{workflow_id}/runs/{run_id}/load")
+    @router.get("/{workflow_id}/runs/{run_id}/performance")
+    @router.get("/{workflow_id}/runs/{run_id}/load")  # the old address, kept for links made before
     async def load(workflow_id: str, run_id: str):
         get(workflow_id)
         run = store.get_run(workflow_id, run_id)

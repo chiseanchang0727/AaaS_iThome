@@ -94,7 +94,7 @@ describe('WorkflowsPage', () => {
     const list = await screen.findByRole('list', { name: 'Workflows' })
     const link = within(list).getByRole('link', { name: /Sessions on both tables/ })
     expect(link).toHaveAttribute('href', '/workflows/wf1')
-    expect(link).toHaveTextContent('2 analyses · 1 batch · 0 reports · partly done')
+    expect(link).toHaveTextContent('2 analyses · 1 batch · 0 reports · partly done in 20 s')
     expect(screen.getByRole('link', { name: '+ New workflow' })).toHaveAttribute('href', '/workflows/new')
   })
 
@@ -106,6 +106,8 @@ describe('WorkflowsPage', () => {
     expect(screen.getByText('collects 2 analyses')).toBeInTheDocument()
 
     expect(screen.getByRole('heading', { name: 'Batch: Both tables' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Run summary')).toHaveTextContent('Took 20 s · 2 analyses · partly done')
+    expect(screen.getByRole('option', { name: /partly done · 20 s$/ })).toBeInTheDocument()
     expect(screen.getByText(/1 of 2 done/)).toBeInTheDocument()
     expect(screen.getByText('would export about 10M rows; the limit is 100,000')).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'Optimize it on its page' }))
@@ -164,14 +166,14 @@ describe('WorkflowsPage', () => {
     expect(screen.getByText('Open report ↗').closest('a')).toHaveAttribute('href', url)
   })
 
-  it('shows the results and the load of a run apart, never on one page', async () => {
+  it('shows the results and the performance of a run apart, never on one page', async () => {
     mockFetch(backend())
     renderAt('/workflows/wf3')
     expect(await screen.findByRole('heading', { name: 'Report: Sessions report' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'Results' })).toHaveAttribute('aria-selected', 'true')
-    await userEvent.click(screen.getByRole('tab', { name: 'Load' }))
-    expect(screen.getByRole('heading', { name: 'Load of this run' })).toBeInTheDocument()
-    expect(screen.getByTitle('Load.html')).toHaveAttribute('src', '/api/workflows/wf3/runs/20261011-100000000-aaaa/load')
+    await userEvent.click(screen.getByRole('tab', { name: 'Performance' }))
+    expect(screen.getByRole('heading', { name: 'Performance of this run' })).toBeInTheDocument()
+    expect(screen.getByTitle('Performance.html')).toHaveAttribute('src', '/api/workflows/wf3/runs/20261011-100000000-aaaa/performance')
     expect(screen.queryByTitle('Sessions report.html')).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('tab', { name: 'Results' }))
     expect(screen.getByTitle('Sessions report.html')).toBeInTheDocument()

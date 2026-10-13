@@ -8,7 +8,7 @@ were written by the agent's scripts, so each stays in a sandboxed frame that
 may run its chart script and nothing more.
 
 The load of a run is a page of its own (`render_load`), not part of a
-report: a report is the results. The load page covers the whole run: every
+report: a report is the results. The performance page covers the whole run: every
 batch, and each analysis's memory and CPU while its script ran.
 """
 
@@ -106,11 +106,11 @@ def render(run: WorkflowRun, report_id: str, read_output: ReadOutput) -> str:
 
 
 def render_load(run: WorkflowRun) -> str:
-    """The load page of `run`: every batch in it, how much it used and when, down to each analysis."""
+    """The performance page of `run`: every batch in it, how long it took, what it used and when, down to each analysis."""
     by_id = {n.node_id: n for n in run.nodes}
     groups = [(run.titles.get(b, "Batch"), [by_id[i] for i in ids if i in by_id]) for b, ids in run.batches.items()]
     nodes = list({n.node_id: n for _, members in groups for n in members}.values())
-    title = f"Load: {run.workflow_title or 'Workflow'}"
+    title = f"Performance: {run.workflow_title or 'Workflow'}"
     took = f" · took {run.seconds:.0f}s" if run.seconds is not None else ""
     sections = []
     for name, members in groups:
