@@ -176,7 +176,7 @@ def analyses_api(
 
     async def sandbox_for(conversation_id: str):
         """The conversation's sandbox, started if need be: (conversation, None), or (None, why not)."""
-        conversation = await manager.get_or_create(conversation_id, account)
+        conversation = await manager.get_or_create(conversation_id, account, kind="run")
         # Why a start failed is a sandbox event; keep it, so the run can say so.
         unavailable: list[str] = []
         conversation.on_event = lambda event, fields: unavailable.append(str(fields.get("reason", ""))) \
@@ -189,6 +189,12 @@ def analyses_api(
             return None, f"no sandbox could be started{why}; try again"
         return conversation, None
 
+    async def busy(conversation, work):
+        """Run `work` holding the conversation's lock: while a run uses its sandbox, nothing reclaims or
+        reaps it, as for a chat answering."""
+        async with conversation.lock:
+            return await work
+
     async def retire(lane: Lane) -> None:
         """Close the lane's sandbox; its next analysis gets a new one."""
         await manager.close(lane.conversation_id)
@@ -198,7 +204,7 @@ def analyses_api(
         await manager.close(lane.conversation_id)
 
     async def open_lane(lane: Lane) -> None:
-        await manager.get_or_create(lane.conversation_id, account)  # its sandbox starts in the background
+        await manager.get_or_create(lane.conversation_id, account, kind="run")  # its sandbox starts in the background
 
     async def fetch(analysis: Analysis, swaps: dict[str, str], estimates: list[InputMeasure] | None) -> Fetched:
         return await fetch_inputs(analysis, query, read_dataset, swaps, estimates)
@@ -237,7 +243,7 @@ def analyses_api(
             fetched = await fetching
             # A reused sandbox is cleaned in the same call that makes this run's folder.
             prepare = clean_first(lane_folder(work_dir, conversation_id)) if reused else ""
-            result = await run_once(conversation.sandbox, analysis, record, estimates, fetched, prepare)
+            result = await busy(conversation, run_once(conversation.sandbox, analysis, record, estimates, fetched, prepare))
             if reused and not result.ok and (result.error or "").startswith("could not make the scratch folder"):
                 await retire(lane)  # it would not clean up: a new sandbox, once
                 conversation_id = lane.conversation_id
@@ -246,7 +252,7 @@ def analyses_api(
                     result = RunResult(ok=False, error=why)
                     return
                 record.sandbox, record.sandbox_at, record.reused = conversation_id, now_ms(), False
-                result = await run_once(conversation.sandbox, analysis, record, estimates, fetched)
+                result = await busy(conversation, run_once(conversation.sandbox, analysis, record, estimates, fetched))
             if lane is not None:
                 lane.runs += 1
             rewritten_for_memory = analysis.optimization is not None and analysis.optimization.kind == "sandbox_memory"
@@ -257,7 +263,7 @@ def analyses_api(
                 record.notes.append(upgrade.note)
                 if upgrade.sandbox is not None:
                     upgraded = True
-                    result = await run_once(upgrade.sandbox, analysis, record, estimates, fetched)
+                    result = await busy(conversation, run_once(upgrade.sandbox, analysis, record, estimates, fetched))
             if lane is not None and result.killed and not upgraded:
                 await retire(lane)  # what ran out of memory may have left the sandbox unwell: not passed on
         except Exception as e:
