@@ -41,9 +41,11 @@ import type {
   WorkflowBody,
   WorkflowNodeRun,
   WorkflowRun,
+  WorkflowSettings,
   WorkflowSummary,
 } from '../api/types'
 import { ArtifactView } from '../chat/ArtifactView'
+import { Suggestions } from './Suggestions'
 
 const POLL_MS = 2000
 const DRAG_TYPE = 'application/x-saved-analysis'
@@ -118,6 +120,8 @@ function batchStatus(nodes: WorkflowNodeRun[]): Status | undefined {
 type AnalysisData = {
   analysisId: string
   sources: Record<string, string>
+  /** Higher runs earlier ("run first"). */
+  priority: number
   title: string
   missing: boolean
   status?: Status
@@ -134,8 +138,12 @@ const CONNECTS: Record<string, string> = { analysis: 'batch', batch: 'report' }
 
 function AnalysisNodeView({ data, selected }: NodeProps<AnalysisFlowNode>) {
   return (
-    <div className={selected ? 'wf-node selected' : 'wf-node'}>
-      <span className="wf-node-kind">Analysis</span>
+    <div className={['wf-node', selected && 'selected', data.priority > 0 && 'wf-first'].filter(Boolean).join(' ')}>
+      <span className="wf-node-kind">
+        Analysis
+        {/* On the top line: the node keeps its height, so it never covers the one below. */}
+        {data.priority > 0 && <span className="wf-node-first">runs first</span>}
+      </span>
       <span className="wf-node-title">{data.missing ? `${data.analysisId} (deleted)` : data.title}</span>
       <span className="wf-node-meta">on {onTables(data.sources)}</span>
       <StatusPill status={data.status} />
@@ -182,7 +190,7 @@ function toFlow(workflow: Workflow): { nodes: FlowNode[]; edges: Edge[] } {
       ? {
           id: n.id, type: 'analysis', position: n.position,
           data: {
-            analysisId: n.analysis_id, sources: n.sources,
+            analysisId: n.analysis_id, sources: n.sources, priority: n.priority ?? 0,
             title: workflow.analyses[n.analysis_id]?.title ?? n.analysis_id,
             missing: workflow.analyses[n.analysis_id] === null,
           },
@@ -193,13 +201,14 @@ function toFlow(workflow: Workflow): { nodes: FlowNode[]; edges: Edge[] } {
   return { nodes, edges }
 }
 
-function toBody(title: string, nodes: FlowNode[], edges: Edge[]): WorkflowBody {
+function toBody(title: string, nodes: FlowNode[], edges: Edge[], settings: WorkflowSettings): WorkflowBody {
   return {
     title,
+    settings,
     nodes: nodes.map((n) => {
       const position = { x: Math.round(n.position.x), y: Math.round(n.position.y) }
       return n.type === 'analysis'
-        ? { kind: 'analysis', id: n.id, analysis_id: n.data.analysisId, sources: n.data.sources, position }
+        ? { kind: 'analysis', id: n.id, analysis_id: n.data.analysisId, sources: n.data.sources, priority: n.data.priority, position }
         : { kind: n.type, id: n.id, title: n.data.title, position }
     }),
     edges: edges.map((e) => ({ source: e.source, target: e.target })),
@@ -339,6 +348,7 @@ function Editor({ id }: { id: string | null }) {
   const navigate = useNavigate()
   const flow = useReactFlow()
   const [title, setTitle] = useState('Untitled workflow')
+  const [settings, setSettings] = useState<WorkflowSettings>({ lanes: null })
   const [nodes, setNodes] = useState<FlowNode[]>(() =>
     id ? [] : [{ id: newId('b'), type: 'batch', position: { x: 520, y: 140 }, data: { title: 'Batch', count: 0 } }],
   )
@@ -351,8 +361,8 @@ function Editor({ id }: { id: string | null }) {
   const [error, setError] = useState<string | null>(null)
   const [selected, setSelected] = useState<string | null>(null)
   const [shownRun, setShownRun] = useState<string | null>(null)
-  // Below the canvas: a run's results, or its performance (time and resources). Never both on one page.
-  const [view, setView] = useState<'results' | 'performance'>('results')
+  // Below the canvas: a run's results, its performance (time and resources), or the advisor's suggestions.
+  const [view, setView] = useState<'results' | 'performance' | 'suggestions'>('results')
   const [options, setOptions] = useState<Record<string, SourceOption[]>>({})
   const [confirmDelete, setConfirmDelete] = useState(false)
 
@@ -368,6 +378,7 @@ function Editor({ id }: { id: string | null }) {
       .then((workflow) => {
         const shape = toFlow(workflow)
         setTitle(workflow.title)
+        setSettings(workflow.settings ?? { lanes: null })
         setNodes(shape.nodes)
         setEdges(shape.edges)
         setDetail(workflow)
@@ -450,7 +461,7 @@ function Editor({ id }: { id: string | null }) {
     const count = nodes.filter((n) => n.type === 'analysis').length
     const node: AnalysisFlowNode = {
       id: newId('a'), type: 'analysis', position: position ?? { x: 40, y: 30 + count * 120 },
-      data: { analysisId, sources: {}, title: analysis.title, missing: false },
+      data: { analysisId, sources: {}, priority: 0, title: analysis.title, missing: false },
     }
     setNodes((current) => [...current, node])
     setDirty(true)
@@ -504,7 +515,7 @@ function Editor({ id }: { id: string | null }) {
 
   /** Save, and the workflow as saved; a new one moves to its own address unless `stay`. */
   const save = async (stay = false): Promise<Workflow> => {
-    const body = toBody(title, nodes, edges)
+    const body = toBody(title, nodes, edges, settings)
     const result = id ? await saveWorkflow(id, body) : await createWorkflow(body)
     setDetail(result)
     setDirty(false)
@@ -646,6 +657,16 @@ function Editor({ id }: { id: string | null }) {
                   }
                 />
               )}
+              <label className="field inline">
+                <input
+                  type="checkbox"
+                  checked={selectedNode.data.priority > 0}
+                  onChange={(e) => updateNode(selectedNode.id, { priority: e.target.checked ? 1 : 0 })}
+                  disabled={running}
+                />
+                Run first
+              </label>
+              <p className="muted small">Analyses marked to run first start before the others; the rest run longest first.</p>
               <button className="secondary small" onClick={() => removeNode(selectedNode.id)} disabled={running}>
                 Remove from workflow
               </button>
@@ -698,6 +719,24 @@ function Editor({ id }: { id: string | null }) {
                 <li><b>Run</b> starts every connected analysis at once.</li>
               </ol>
               <p className="muted small">Select a node or an edge and press Backspace to remove it.</p>
+              <label className="field">
+                Sandboxes per run
+                <select
+                  value={settings.lanes ?? ''}
+                  onChange={(e) => {
+                    setSettings({ lanes: e.target.value ? Number(e.target.value) : null })
+                    setDirty(true)
+                  }}
+                  disabled={running}
+                >
+                  <option value="">default (all but one, so chat keeps one)</option>
+                  {[1, 2, 3].map((k) => (
+                    <option key={k} value={k}>
+                      {k}
+                    </option>
+                  ))}
+                </select>
+              </label>
             </>
           )}
         </aside>
@@ -712,13 +751,18 @@ function Editor({ id }: { id: string | null }) {
             <button role="tab" aria-selected={view === 'performance'} className={view === 'performance' ? 'active' : ''} onClick={() => setView('performance')}>
               Performance
             </button>
+            <button role="tab" aria-selected={view === 'suggestions'} className={view === 'suggestions' ? 'active' : ''} onClick={() => setView('suggestions')}>
+              Suggestions
+            </button>
           </div>
           <h2>
-            {view === 'performance'
+            {view === 'suggestions'
+              ? 'Suggestions'
+              : view === 'performance'
               ? 'Performance of this run'
               : below ? `${below.kind === 'report' ? 'Report' : 'Batch'}: ${belowTitle}` : 'Results'}
           </h2>
-          {detail && detail.runs.length > 0 && (
+          {view !== 'suggestions' && detail && detail.runs.length > 0 && (
             <label className="field inline">
               Run
               <select value={run?.id ?? ''} onChange={(e) => setShownRun(e.target.value)}>
@@ -731,8 +775,26 @@ function Editor({ id }: { id: string | null }) {
             </label>
           )}
         </div>
-        {run && <RunSummary run={run} />}
-        {!run ? (
+        {view !== 'suggestions' && run && <RunSummary run={run} />}
+        {view === 'suggestions' ? (
+          id ? (
+            <Suggestions
+              workflowId={id}
+              titles={Object.fromEntries(nodes.filter((n) => n.type === 'analysis').map((n) => [n.id, n.data.title]))}
+              hasRuns={(detail?.runs.length ?? 0) > 0}
+              blocked={running ? 'The workflow is running: apply it when the run ends.' : dirty ? 'Save your changes first.' : null}
+              onApplied={(workflow) => {
+                const shape = toFlow(workflow)
+                setNodes(shape.nodes)
+                setEdges(shape.edges)
+                setSettings(workflow.settings ?? { lanes: null })
+                setDetail(workflow)
+              }}
+            />
+          ) : (
+            <p className="muted">Save the workflow and run it first.</p>
+          )
+        ) : !run ? (
           <p className="muted">Not run yet. Run the workflow to see its {view === 'performance' ? 'performance' : 'results'} here.</p>
         ) : view === 'performance' ? (
           id && <ArtifactView artifact={{ name: 'Performance.html', kind: 'html', url: workflowPerformanceUrl(id, run.id) }} />

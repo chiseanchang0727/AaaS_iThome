@@ -584,3 +584,23 @@ pre.script { max-height: 480px; }
 .wf-report-header h2 { flex: 1; }
 .wf-run-summary { margin: 8px 0 12px; font-size: 1.05em; }
 .wf-run-summary b { font-size: 1.15em; }
+
+/* Workflow advisor: suggestions below the canvas. */
+.wf-node-kind { display: flex; align-items: center; gap: 6px; }
+.wf-node-first {
+  font-size: 10px; letter-spacing: 0.05em; font-weight: 700; padding: 1px 6px; border-radius: 99px;
+  background: var(--accent); color: var(--accent-text);
+}
+.wf-node.wf-first { border-color: var(--accent); border-width: 2px; }
+.wf-suggestions { display: flex; flex-direction: column; gap: 8px; }
+.wf-suggestions-ask { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.wf-advice-summary { font-size: 1.05em; margin: 4px 0 0; }
+.wf-suggestion-list { display: flex; flex-direction: column; gap: 10px; margin-top: 8px; }
+.wf-suggestion { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px 14px; display: flex; flex-direction: column; gap: 4px; }
+.wf-suggestion p { margin: 0; }
+.wf-suggestion header { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.wf-suggestion-kind { font-weight: 600; }
+.wf-suggestion-what { color: var(--muted); }
+.wf-suggestion-actions { display: flex; gap: 8px; align-items: center; margin-top: 4px; }
+.wf-suggestion-dismissed { opacity: 0.6; }
+.wf-status-dismissed { color: var(--muted); }

@@ -3,7 +3,7 @@ import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import type { AnalysisSummary, SourceOption, Workflow, WorkflowRun, WorkflowSummary } from '../api/types'
+import type { Advice, AnalysisSummary, SourceOption, Workflow, WorkflowRun, WorkflowSummary } from '../api/types'
 import { jsonResponse, mockFetch, type Call } from '../test/fetch'
 import { WorkflowsPage } from './WorkflowsPage'
 
@@ -54,6 +54,17 @@ const WITH_REPORT: Workflow = {
   runs: [{ ...RUN, workflow_id: 'wf3', reports: { report: ['batch'] }, titles: { batch: 'Both tables', report: 'Sessions report' } }],
 }
 
+const ADVICE: Advice = {
+  id: '20261013-100000000-aaaa', workflow_id: 'wf1', created_at: '2026-10-13T10:00:00Z', goal: 'fastest',
+  runs: [RUN.id], model: 'stand-in', summary: 'Most of the time is waiting for sandboxes.',
+  suggestions: [
+    { kind: 'set_lanes', node_ids: [], value: 1, reason: 'Only one analysis ran at a time.', expected_gain: 'one sandbox less',
+      applicable: true, note: 'Runs of this workflow will use at most 1 sandboxes.', status: 'pending', result: '' },
+    { kind: 'share_data', node_ids: ['small', 'big'], value: null, reason: 'Both read events.', expected_gain: 'one query less',
+      applicable: false, note: 'Advice: change the workflow by hand if you agree.', status: 'pending', result: '' },
+  ],
+}
+
 const SOURCES: SourceOption[] = [
   { table: 'events', candidates: [{ name: 'events_big', ok: true, problems: [] }, { name: 'videos', ok: false, problems: ['no column session_id'] }] },
 ]
@@ -65,6 +76,14 @@ function backend() {
       return jsonResponse({ ...WORKFLOW, id: 'wf2', ...(call.body as object), runs: [] }, 201)
     }
     if (call.url === '/api/workflows/wf1/runs') return jsonResponse({ ...RUN, id: '20261011-110000000-dddd', status: 'running' }, 202)
+    if (call.url === '/api/workflows/wf1/advice' && call.method === 'GET') return jsonResponse([])
+    if (call.url === '/api/workflows/wf1/advice' && call.method === 'POST') return jsonResponse(ADVICE, 201)
+    if (call.url === `/api/workflows/wf1/advice/${ADVICE.id}/suggestions/0/apply`) {
+      return jsonResponse({
+        advice: { ...ADVICE, suggestions: [{ ...ADVICE.suggestions[0], status: 'applied', result: 'Runs now use at most 1 sandbox.' }, ADVICE.suggestions[1]] },
+        workflow: { ...WORKFLOW, settings: { lanes: 1 } },
+      })
+    }
     if (call.url === '/api/workflows/wf1') return jsonResponse(WORKFLOW)
     if (call.url === '/api/workflows/wf3') return jsonResponse(WITH_REPORT)
     if (call.url === '/api/analyses') return jsonResponse([ANALYSIS])
@@ -177,5 +196,39 @@ describe('WorkflowsPage', () => {
     expect(screen.queryByTitle('Sessions report.html')).not.toBeInTheDocument()
     await userEvent.click(screen.getByRole('tab', { name: 'Results' }))
     expect(screen.getByTitle('Sessions report.html')).toBeInTheDocument()
+  })
+
+  it('asks the advisor and applies a suggestion, while advice stays advice', async () => {
+    const calls = mockFetch(backend())
+    renderAt('/workflows/wf1')
+    await userEvent.click(await screen.findByRole('tab', { name: 'Suggestions' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Suggest improvements' }))
+    expect(await screen.findByText('Most of the time is waiting for sandboxes.')).toBeInTheDocument()
+
+    const lanes = screen.getByRole('article', { name: 'Sandboxes per run' })
+    expect(lanes).toHaveTextContent('1 sandbox')
+    const share = screen.getByRole('article', { name: 'Share data' })
+    expect(share).toHaveTextContent('Median session length, Median session length')  // the node titles
+    expect(within(share).queryByRole('button', { name: 'Apply' })).not.toBeInTheDocument()
+
+    await userEvent.click(within(lanes).getByRole('button', { name: 'Apply' }))
+    expect(await within(lanes).findByText('Runs now use at most 1 sandbox.')).toBeInTheDocument()
+    expect(calls.some((c) => c.method === 'POST' && c.url.endsWith('/suggestions/0/apply'))).toBe(true)
+    expect(calls.find((c) => c.url === '/api/workflows/wf1/advice' && c.method === 'POST')?.body).toEqual({ goal: 'fastest' })
+  })
+
+  it('keeps settings and run first when saving', async () => {
+    const calls = mockFetch((call) =>
+      call.method === 'PUT' ? jsonResponse({ ...WORKFLOW, ...(call.body as object) }) : backend()(call),
+    )
+    const { container } = renderAt('/workflows/wf1')
+    await screen.findByRole('textbox', { name: 'Workflow title' })
+    await userEvent.selectOptions(screen.getByRole('combobox', { name: 'Sandboxes per run' }), '1')
+    fireEvent.click(container.querySelector('.react-flow__node[data-id="big"]') as HTMLElement)
+    await userEvent.click(screen.getByRole('checkbox', { name: 'Run first' }))
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }))
+    const body = calls.find((c) => c.method === 'PUT')?.body as { settings: unknown; nodes: { id: string; priority?: number }[] }
+    expect(body.settings).toEqual({ lanes: 1 })
+    expect(Object.fromEntries(body.nodes.filter((n) => n.priority !== undefined).map((n) => [n.id, n.priority]))).toEqual({ small: 0, big: 1 })
   })
 })

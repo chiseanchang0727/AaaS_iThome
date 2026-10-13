@@ -24,6 +24,7 @@ import type {
   PastConversationSummary,
   SystemRun,
   SystemRunInfo,
+  Advice,
   Workflow,
   WorkflowBody,
   WorkflowRun,
@@ -288,4 +289,35 @@ export function workflowReportUrl(id: string, runId: string, nodeId: string): st
 /** One workflow run's performance: time and resources of every batch and analysis, as one HTML page. Not the results. */
 export function workflowPerformanceUrl(id: string, runId: string): string {
   return `/api/workflows/${encodeURIComponent(id)}/runs/${encodeURIComponent(runId)}/performance`
+}
+
+/** Ask the workflow advisor how to rearrange a workflow, from its last runs. Takes a while: a model answers. */
+export async function askAdvice(id: string, goal: Advice['goal']): Promise<Advice> {
+  return json(
+    await fetch(`/api/workflows/${encodeURIComponent(id)}/advice`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ goal }),
+    }),
+  )
+}
+
+export async function listAdvice(id: string): Promise<Advice[]> {
+  return json(await fetch(`/api/workflows/${encodeURIComponent(id)}/advice`))
+}
+
+export async function applySuggestion(id: string, adviceId: string, index: number): Promise<{ advice: Advice; workflow: Workflow }> {
+  return json(
+    await fetch(`/api/workflows/${encodeURIComponent(id)}/advice/${encodeURIComponent(adviceId)}/suggestions/${index}/apply`, {
+      method: 'POST',
+    }),
+  )
+}
+
+export async function dismissSuggestion(id: string, adviceId: string, index: number): Promise<Advice> {
+  return json(
+    await fetch(`/api/workflows/${encodeURIComponent(id)}/advice/${encodeURIComponent(adviceId)}/suggestions/${index}/dismiss`, {
+      method: 'POST',
+    }),
+  )
 }

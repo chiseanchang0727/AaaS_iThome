@@ -31,6 +31,8 @@ class AnalysisNode(BaseModel):
     analysis_id: str
     sources: dict[str, str] = {}
     """Tables to read instead of the analysis's own, e.g. {"events": "events_enterprise"}."""
+    priority: int = 0
+    """Higher runs earlier; among equals, the longest first (by past runs)."""
     position: Position = Position()
 
 
@@ -61,11 +63,18 @@ class Edge(BaseModel):
     """A batch node's id, or a report node's."""
 
 
+class WorkflowSettings(BaseModel):
+    lanes: int | None = None
+    """How many sandboxes a run of it uses at most; None: the default (all but one per account).
+    Never more than an account may hold."""
+
+
 class Workflow(BaseModel):
     id: str
     title: str
     nodes: list[Node] = []
     edges: list[Edge] = []
+    settings: WorkflowSettings = WorkflowSettings()
     created_at: str = Field(default_factory=now)
     updated_at: str | None = None
 
@@ -77,6 +86,8 @@ class Workflow(BaseModel):
         problems = []
         if not self.title.strip():
             problems.append("give it a title")
+        if self.settings.lanes is not None and self.settings.lanes < 1:
+            problems.append("a workflow needs at least one sandbox")
         ids = [n.id for n in self.nodes]
         problems += [f"two nodes have the id {i!r}" for i in sorted({i for i in ids if ids.count(i) > 1})]
         seen = set()

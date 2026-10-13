@@ -108,6 +108,9 @@ class AnalysesApi:
     """Start a lane's sandbox now, before its first analysis needs it."""
     fetch: Callable[[Analysis, dict[str, str], list[InputMeasure] | None], Awaitable[Fetched]]
     """Fetch an analysis's inputs ahead of its run: (analysis, table swaps, estimates)."""
+    optimize: Callable[[str, str], Awaitable[dict]]
+    """Start Optimize for a run that broke a limit, as its page does: (analysis id, run id). Raises
+    HTTPException when it cannot start (no limit broken, running, an older version)."""
 
 
 class RunRequest(BaseModel):
@@ -444,4 +447,4 @@ def analyses_api(
         return {"deleted": analysis_id}
 
     return AnalysesApi(router=router, start=start, optimizing=lambda aid: "optimize" in running.get(aid, {}),
-                       precheck=precheck, close_lane=close_lane, open_lane=open_lane, fetch=fetch)
+                       precheck=precheck, close_lane=close_lane, open_lane=open_lane, fetch=fetch, optimize=optimize)

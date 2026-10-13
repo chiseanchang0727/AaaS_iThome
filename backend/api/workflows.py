@@ -8,6 +8,11 @@
     POST   /api/workflows/{id}/runs                 run it, in the background (202)
     GET    /api/workflows/{id}/runs/{run_id}        one run: each node's status and outputs
     GET    /api/workflows/{id}/runs/{run_id}/reports/{node}   a report node's page for that run: the results (HTML)
+    POST   /api/workflows/{id}/advice                      ask the advisor how to rearrange it: {"goal": "fastest" |
+                                                           "cheapest"} -> its suggestions, checked (201)
+    GET    /api/workflows/{id}/advice                      every time it was asked, newest first
+    POST   /api/workflows/{id}/advice/{advice}/suggestions/{n}/apply     apply one (set_lanes, run_first, optimize)
+    POST   /api/workflows/{id}/advice/{advice}/suggestions/{n}/dismiss   set one aside
     GET    /api/workflows/{id}/runs/{run_id}/performance          that run's performance: time and resources of every
                                                                    batch and analysis (HTML); /load is the old address
 
@@ -17,9 +22,11 @@ run of that analysis (trigger "workflow", on the node's tables). How:
     1. The size check of every node first (database only): a node it stops is
        recorded as "needs_optimization" at once and never waits for a sandbox.
        The lanes' sandboxes start meanwhile.
-    2. The rest queue, longest first, by their analysis's past runs on the same
-       tables (one never run counts as longest: it goes first).
-    3. `lanes` sandboxes (fewer than an account may hold, so chat keeps one)
+    2. The rest queue by priority (a node's "run first"), then longest first,
+       by their analysis's past runs on the same tables (one never run counts
+       as longest: it goes first).
+    3. `lanes` sandboxes (the workflow's own setting, or all but one an account
+       may hold, so chat keeps one; never more than an account may hold)
        take the queue: each runs analyses one after another, cleaning up in
        between (api/analyses.py, Lane), and is given back when the queue is
        empty. Renting a sandbox takes 10-15 seconds and a script about one:
@@ -49,7 +56,8 @@ from analyses.models import now, now_ms
 from analyses.sources import QueryRows, check_mapping
 from analyses.store import new_id, new_run_id
 from workflows import Workflow, WorkflowRun, WorkflowStore
-from workflows.models import Edge, Node, NodeRun
+from workflows.advisor import RUNS, Advise, AdviceRecord, Goal, check, summarize
+from workflows.models import Edge, Node, NodeRun, WorkflowSettings
 from workflows.report import render, render_load
 
 from .analyses import AnalysesApi, Lane
@@ -58,10 +66,15 @@ from .app import ARTIFACT_HEADERS
 log = logging.getLogger(__name__)
 
 
+class AdviceRequest(BaseModel):
+    goal: Goal = "fastest"
+
+
 class WorkflowBody(BaseModel):
     title: str
     nodes: list[Node] = []
     edges: list[Edge] = []
+    settings: WorkflowSettings = WorkflowSettings()
 
 
 def _seconds(start: str, end: str) -> float:
@@ -70,11 +83,18 @@ def _seconds(start: str, end: str) -> float:
 
 
 def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: AnalysesApi, *,
-                     query_rows: QueryRows, sandbox_limit: int | None = None, lanes: int | None = None) -> APIRouter:
+                     query_rows: QueryRows, sandbox_limit: int | None = None, lanes: int | None = None,
+                     advise: Advise | None = None, advisor_name: str = "", settings: dict | None = None) -> APIRouter:
     """`api`: starts analysis runs as the Run button does; `query_rows`: to check each node's table swaps;
     `sandbox_limit`: how many sandboxes an account may hold at once; `lanes`: how many of them a workflow run
-    uses (default: all but one, for chat)."""
-    lanes = lanes or max(1, (sandbox_limit or 2) - 1)
+    uses (default: all but one, for chat); `advise`: the advisor's model call (workflows/advisor.py), named
+    `advisor_name`; `settings`: what the advisor is told about the limits (warm sandboxes, export limits...)."""
+    default_lanes = lanes or max(1, (sandbox_limit or 2) - 1)
+
+    def lanes_for(workflow: Workflow) -> int:
+        """Its own setting, or the default; at least one, and never more than an account may hold."""
+        wanted = workflow.settings.lanes or default_lanes
+        return max(1, min(wanted, sandbox_limit) if sandbox_limit else wanted)
     router = APIRouter(prefix="/api/workflows")
     running: dict[str, asyncio.Task] = {}
     """workflow id -> its run in progress."""
@@ -130,9 +150,10 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
                 return record.seconds
         return float("inf")
 
-    async def schedule(run: WorkflowRun, jobs: list) -> None:
+    async def schedule(run: WorkflowRun, jobs: list, priorities: dict[str, int]) -> None:
         """Check every job's size, start the stopped ones (they need no sandbox), run the rest in lanes."""
         # Start the sandboxes while the sizes are checked: the check is database work, a start takes 10-15 s.
+        lanes = run.lanes or 1
         opened = [Lane(name=f"workflow-{run.id}-{k + 1}") for k in range(min(lanes, len(jobs)))]
         for lane in opened:
             await api.open_lane(lane)
@@ -164,8 +185,9 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
             return task
 
         tasks = [launch(*job) for job in stopped]
-        # Longest first: short ones fill the gaps at the end. The sort keeps node order among equals.
-        queue.sort(key=lambda job: -expected_seconds(job[1].id, job[2]))
+        # "Run first" before the rest; then longest first: short ones fill the gaps at the end.
+        # The sort keeps node order among equals.
+        queue.sort(key=lambda job: (-priorities.get(job[0].node_id, 0), -expected_seconds(job[1].id, job[2])))
 
         async def work(lane: Lane) -> None:
             try:
@@ -231,7 +253,8 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
 
     @router.post("", status_code=201)
     async def create(body: WorkflowBody):
-        workflow = Workflow(id=new_id(), title=body.title.strip(), nodes=body.nodes, edges=body.edges)
+        workflow = Workflow(id=new_id(), title=body.title.strip(), nodes=body.nodes, edges=body.edges,
+                            settings=body.settings)
         found = await problems(workflow)
         if found:
             raise HTTPException(400, "; ".join(found))
@@ -247,7 +270,7 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
         old = get(workflow_id)
         if workflow_id in running:
             raise HTTPException(409, "this workflow is running; change it when the run ends")
-        workflow = Workflow(id=old.id, title=body.title.strip(), nodes=body.nodes, edges=body.edges,
+        workflow = Workflow(id=old.id, title=body.title.strip(), nodes=body.nodes, edges=body.edges, settings=body.settings,
                             created_at=old.created_at, updated_at=now())
         found = await problems(workflow)
         if found:
@@ -281,7 +304,7 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
 
         run = WorkflowRun(id=new_run_id(), workflow_id=workflow.id, started_at=now(), batches=workflow.batches(),
                           reports=workflow.reports(), workflow_title=workflow.title, sandbox_limit=sandbox_limit,
-                          lanes=lanes, titles={n.id: n.title for n in workflow.nodes if n.kind != "analysis"})
+                          lanes=lanes_for(workflow), titles={n.id: n.title for n in workflow.nodes if n.kind != "analysis"})
         jobs = []
         for node, analysis in targets:
             swaps = {old: new for old, new in node.sources.items() if old != new}
@@ -290,7 +313,8 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
             run.nodes.append(entry)
             jobs.append((entry, analysis, swaps))
         store.save_run(run)
-        running[workflow_id] = asyncio.create_task(finish(run, [asyncio.create_task(schedule(run, jobs))]))
+        priorities = {n.id: n.priority for n in workflow.nodes if n.kind == "analysis"}
+        running[workflow_id] = asyncio.create_task(finish(run, [asyncio.create_task(schedule(run, jobs, priorities))]))
         return run.model_dump()
 
     @router.get("/{workflow_id}/runs/{run_id}")
@@ -300,6 +324,117 @@ def workflows_router(store: WorkflowStore, analyses: AnalysisStore, api: Analyse
         if run is None:
             raise HTTPException(404, f"no run '{run_id}'")
         return refresh(run).model_dump()
+
+    # --- the advisor --------------------------------------------------------------------------
+
+    async def table_rows(names: set[str]) -> dict[str, int]:
+        safe = sorted(n for n in names if n.replace("_", "").isalnum())
+        if not safe:
+            return {}
+        listed = ", ".join(f"'{n}'" for n in safe)
+        try:
+            rows = await query_rows(f"SELECT relname AS name, reltuples::bigint AS rows FROM pg_class "
+                                    f"WHERE relname IN ({listed}) AND relkind = 'r'")
+        except Exception:
+            return {}  # sizes help the advisor; without them it still answers
+        return {r["name"]: int(r["rows"]) for r in rows if "name" in r and "rows" in r}
+
+    @router.post("/{workflow_id}/advice", status_code=201)
+    async def ask_advice(workflow_id: str, body: AdviceRequest | None = None):
+        workflow = get(workflow_id)
+        if advise is None:
+            raise HTTPException(503, "no advisor is configured")
+        goal = body.goal if body else "fastest"
+        runs = [refresh(r) for r in store.runs(workflow_id) if r.status != "running"][:RUNS]
+        if not runs:
+            raise HTTPException(400, "run the workflow first: the advisor works from its runs")
+        recipes = {n.analysis_id: a for n in workflow.nodes if n.kind == "analysis"
+                   for a in [analyses.get(n.analysis_id)] if a is not None}
+        records = {n.run_id: r for run in runs for n in run.nodes if n.run_id
+                   for r in [analyses.get_run(n.analysis_id, n.run_id)] if r is not None}
+        tables = {t for run in runs for n in run.nodes if n.run_id in records
+                  for m in (records[n.run_id].measurements.inputs if records[n.run_id].measurements else [])
+                  for t in m.tables}
+        told = {**(settings or {}), "sandbox_limit": sandbox_limit, "default_lanes": default_lanes,
+                "lanes_now": lanes_for(workflow)}
+        summary = summarize(workflow, runs, recipes, records, told, await table_rows(tables), goal)
+        try:
+            advice = await advise(summary, goal)
+        except Exception as e:
+            log.warning("the advisor failed for workflow %s", workflow_id, exc_info=True)
+            raise HTTPException(502, f"the advisor could not answer: {e}") from None
+        # Optimize can start only from a run that broke a limit: the node's newest one.
+        findings = {}
+        for run in runs:
+            for n in run.nodes:
+                if n.node_id not in findings and n.run_id in records:
+                    findings[n.node_id] = bool(records[n.run_id].findings)
+        record = AdviceRecord(id=new_run_id(), workflow_id=workflow_id, goal=goal, runs=[r.id for r in runs],
+                              model=advisor_name, summary=advice.summary,
+                              suggestions=check(advice, workflow, sandbox_limit, findings))
+        store.save_advice(record)
+        return record.model_dump()
+
+    @router.get("/{workflow_id}/advice")
+    async def list_advice(workflow_id: str):
+        get(workflow_id)
+        return [a.model_dump() for a in store.advice(workflow_id)]
+
+    def suggestion(workflow_id: str, advice_id: str, index: int):
+        advice = store.get_advice(workflow_id, advice_id)
+        if advice is None or not 0 <= index < len(advice.suggestions):
+            raise HTTPException(404, "no such suggestion")
+        return advice, advice.suggestions[index]
+
+    @router.post("/{workflow_id}/advice/{advice_id}/suggestions/{index}/apply")
+    async def apply_suggestion(workflow_id: str, advice_id: str, index: int):
+        workflow = get(workflow_id)
+        advice, s = suggestion(workflow_id, advice_id, index)
+        if not s.applicable:
+            raise HTTPException(400, f"this suggestion is advice: {s.note}")
+        if s.status == "applied":
+            raise HTTPException(409, "it was applied already")
+        if workflow_id in running:
+            raise HTTPException(409, "this workflow is running; apply it when the run ends")
+        if s.kind == "set_lanes":
+            workflow.settings.lanes = s.value
+            s.result = f"Runs of this workflow now use at most {s.value} sandboxes."
+        elif s.kind == "run_first":
+            top = max((n.priority for n in workflow.nodes if n.kind == "analysis"), default=0)
+            moved = [n for n in workflow.nodes if n.kind == "analysis" and n.id in s.node_ids]
+            for n in moved:
+                n.priority = top + 1
+            s.result = f"{', '.join(n.id for n in moved)} now run first."
+        elif s.kind == "optimize_analysis":
+            node = workflow.node(s.node_ids[0])
+            latest = next((n for run in store.runs(workflow_id) for n in run.nodes
+                           if n.node_id == node.id and n.run_id), None)
+            if latest is None:
+                raise HTTPException(409, "that analysis has no run in this workflow to optimize from")
+            try:
+                await api.optimize(node.analysis_id, latest.run_id)
+            except HTTPException as e:
+                s.status, s.result = "failed", f"Optimize could not start: {e.detail}"
+                store.save_advice(advice)
+                raise
+            s.result = (f"Optimize started for {latest.title}. Follow it on the analysis's page; the next run of "
+                        f"this workflow uses the new version.")
+        if s.kind in ("set_lanes", "run_first"):
+            workflow.updated_at = now()
+            store.save(workflow)
+        s.status = "applied"
+        store.save_advice(advice)
+        return {"advice": advice.model_dump(), "workflow": detail(workflow)}
+
+    @router.post("/{workflow_id}/advice/{advice_id}/suggestions/{index}/dismiss")
+    async def dismiss_suggestion(workflow_id: str, advice_id: str, index: int):
+        get(workflow_id)
+        advice, s = suggestion(workflow_id, advice_id, index)
+        if s.status == "applied":
+            raise HTTPException(409, "it was applied already")
+        s.status = "dismissed"
+        store.save_advice(advice)
+        return advice.model_dump()
 
     def read_output(analysis_id: str, run_id: str, name: str) -> bytes | None:
         path = analyses.output_path(analysis_id, run_id, name)

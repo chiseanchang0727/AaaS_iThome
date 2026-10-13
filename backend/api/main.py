@@ -3,6 +3,7 @@
     uv run --env-file ../.env uvicorn api.main:app --reload     # from backend/
 """
 
+import dataclasses
 import uuid
 from pathlib import Path
 
@@ -15,6 +16,7 @@ from analyses.budget import Limits
 from evals.system.judges import Judges
 from sandboxes import get_provider
 from workflows import WorkflowStore
+from workflows.advisor import advisor
 
 from .analyses import analyses_api
 from .app import create_app
@@ -72,7 +74,11 @@ app = create_app(
                          query_rows=lambda sql: query_database(sql, raw=True),
                          sandbox_limit=cfg.server.max_sandboxes_per_account,
                          # One sandbox stays free for chat while a workflow runs.
-                         lanes=max(1, cfg.server.max_sandboxes_per_account - 1)),
+                         lanes=max(1, cfg.server.max_sandboxes_per_account - 1),
+                         advise=advisor(cfg.agent.model), advisor_name=cfg.agent.model,
+                         settings={"warm_sandboxes": cfg.server.warm_sandboxes,
+                                   "export_limits": dataclasses.asdict(Limits.from_config(cfg)),
+                                   "database_timeout_s": cfg.database.timeout}),
     ],
     history=history,
     default_account=cfg.server.default_account,

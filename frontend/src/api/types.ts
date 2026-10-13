@@ -635,6 +635,8 @@ export interface WorkflowAnalysisNode {
   id: string
   analysis_id: string
   sources: Record<string, string>
+  /** Higher runs earlier; among equals, the longest first. */
+  priority?: number
   position: NodePosition
 }
 
@@ -663,10 +665,16 @@ export interface WorkflowEdge {
 }
 
 /** What PUT/POST /api/workflows take. */
+export interface WorkflowSettings {
+  /** Sandboxes a run of it uses at most; null: the default (all but one per account). */
+  lanes: number | null
+}
+
 export interface WorkflowBody {
   title: string
   nodes: WorkflowNode[]
   edges: WorkflowEdge[]
+  settings?: WorkflowSettings
 }
 
 export interface WorkflowNodeRun {
@@ -748,4 +756,33 @@ export interface Workflow extends WorkflowBody {
   running: boolean
   /** Newest first. */
   runs: WorkflowRun[]
+}
+
+export type SuggestionKind = 'set_lanes' | 'run_first' | 'optimize_analysis' | 'share_data' | 'split_workflow' | 'other'
+
+/** One change the workflow advisor suggests, checked: `applicable` ones can be applied with one click. */
+export interface Suggestion {
+  kind: SuggestionKind
+  node_ids: string[]
+  value: number | null
+  reason: string
+  expected_gain: string
+  applicable: boolean
+  /** Why it cannot be applied, or what applying it does. */
+  note: string
+  status: 'pending' | 'applied' | 'dismissed' | 'failed'
+  result: string
+}
+
+/** One time the advisor was asked about a workflow. */
+export interface Advice {
+  id: string
+  workflow_id: string
+  created_at: string
+  goal: 'fastest' | 'cheapest'
+  /** The runs it looked at, newest first. */
+  runs: string[]
+  model: string
+  summary: string
+  suggestions: Suggestion[]
 }
